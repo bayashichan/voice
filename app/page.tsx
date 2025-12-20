@@ -416,13 +416,7 @@ export default function Home() {
 
               <button
                 onClick={proceedToRecording}
-                disabled={micLevel <= 5}
-                className={cn(
-                  "w-full max-w-sm mx-auto py-4 md:py-5 rounded-xl md:rounded-2xl font-bold text-lg md:text-xl transition-all flex items-center justify-center gap-2 shadow-lg",
-                  micLevel > 5
-                    ? "bg-gradient-to-r from-blue-600 to-indigo-600 hover:opacity-90 shadow-blue-900/30"
-                    : "bg-gray-700 text-gray-400 cursor-not-allowed"
-                )}
+                className="w-full max-w-sm mx-auto py-4 md:py-5 rounded-xl md:rounded-2xl font-bold text-lg md:text-xl transition-all flex items-center justify-center gap-2 shadow-lg bg-gradient-to-r from-blue-600 to-indigo-600 hover:opacity-90 shadow-blue-900/30"
               >
                 録音を開始する
                 <ArrowRight className="w-5 h-5 md:w-6 md:h-6" />
