@@ -82,13 +82,13 @@ export default function Home() {
     }
   };
 
-  // 10秒タイマー
+  // 5秒タイマー（iOSのファイルサイズ制限対策で短縮）
   useEffect(() => {
     let timer: NodeJS.Timeout;
     if (appState === "recording") {
       timer = setTimeout(async () => {
         await stopAndUpload();
-      }, 10000);
+      }, 5000); // 5秒に短縮
     }
     return () => clearTimeout(timer);
   }, [appState]);
@@ -489,7 +489,7 @@ export default function Home() {
             </div>
             {analyser && <AudioVisualizer analyser={analyser} isRecording={true} />}
             <div className="w-full h-3 md:h-4 bg-gray-800 rounded-full overflow-hidden">
-              <div className="h-full bg-cyan-500" style={{ animation: 'progress 10s linear forwards' }} />
+              <div className="h-full bg-cyan-500" style={{ animation: 'progress 5s linear forwards' }} />
               <style jsx>{`
                  @keyframes progress {
                    from { width: 0%; }
