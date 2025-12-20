@@ -21,6 +21,7 @@ export default function Home() {
   const micTestRecorderRef = useRef<AudioRecorder | null>(null);
   const [deviceType, setDeviceType] = useState<DeviceType>("pc");
   const [userName, setUserName] = useState<string>("");
+  const isComposingRef = useRef<boolean>(false);
 
   // デバイス判定
   useEffect(() => {
@@ -329,7 +330,16 @@ export default function Home() {
             <input
               type="text"
               value={userName}
-              onChange={(e) => setUserName(e.target.value)}
+              onChange={(e) => {
+                if (!isComposingRef.current) {
+                  setUserName(e.target.value);
+                }
+              }}
+              onCompositionStart={() => { isComposingRef.current = true; }}
+              onCompositionEnd={(e) => {
+                isComposingRef.current = false;
+                setUserName((e.target as HTMLInputElement).value);
+              }}
               placeholder="例：山田太郎"
               className="w-full px-4 py-4 bg-gray-900/80 border border-gray-700 rounded-xl text-white text-lg md:text-xl text-center placeholder-gray-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500"
               autoFocus
