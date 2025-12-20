@@ -445,7 +445,7 @@ export default function Home() {
         {appState === "recording" && (
           <div className="w-full flex flex-col items-center space-y-6">
             <div className="text-cyan-400 font-medium text-lg md:text-xl animate-pulse">
-              10秒間、名前を繰り返してください...
+              フルネームを繰り返し言ってください。
             </div>
             {analyser && <AudioVisualizer analyser={analyser} isRecording={true} />}
             <div className="w-full h-3 md:h-4 bg-gray-800 rounded-full overflow-hidden">
