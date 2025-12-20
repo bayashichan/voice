@@ -329,17 +329,8 @@ export default function Home() {
           <div className="w-full max-w-sm space-y-6">
             <input
               type="text"
-              value={userName}
-              onChange={(e) => {
-                if (!isComposingRef.current) {
-                  setUserName(e.target.value);
-                }
-              }}
-              onCompositionStart={() => { isComposingRef.current = true; }}
-              onCompositionEnd={(e) => {
-                isComposingRef.current = false;
-                setUserName((e.target as HTMLInputElement).value);
-              }}
+              defaultValue=""
+              onChange={(e) => setUserName(e.target.value)}
               placeholder="例：山田太郎"
               className="w-full px-4 py-4 bg-gray-900/80 border border-gray-700 rounded-xl text-white text-lg md:text-xl text-center placeholder-gray-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500"
               autoFocus
