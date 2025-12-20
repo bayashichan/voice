@@ -1,32 +1,87 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Mic, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
+import { Mic, CheckCircle2, AlertCircle, Loader2, Volume2, ArrowRight, Smartphone, Monitor, Settings } from "lucide-react";
 import { AudioRecorder, AudioRecorderResult } from "@/utils/audioRecorder";
 import { GlowCountdown } from "@/components/GlowCountdown";
 import { AudioVisualizer } from "@/components/AudioVisualizer";
 import { blobToBase64 } from "@/utils/fileHelpers";
 import { cn } from "@/utils/cn";
 
-type AppState = "idle" | "countdown" | "recording" | "uploading" | "completed" | "error";
+type AppState = "intro" | "step1" | "step2" | "step3" | "micTest" | "countdown" | "recording" | "uploading" | "completed" | "error";
+type DeviceType = "ios" | "android" | "pc";
 
 export default function Home() {
-  const [appState, setAppState] = useState<AppState>("idle");
+  const [appState, setAppState] = useState<AppState>("intro");
   const [errorMsg, setErrorMsg] = useState<string>("");
   const recorderRef = useRef<AudioRecorder | null>(null);
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
+  const [micTestAnalyser, setMicTestAnalyser] = useState<AnalyserNode | null>(null);
+  const [micLevel, setMicLevel] = useState<number>(0);
+  const micTestRecorderRef = useRef<AudioRecorder | null>(null);
+  const [deviceType, setDeviceType] = useState<DeviceType>("pc");
 
-  // マイク権限の確認とRecorderの初期化
-  const initializeRecorder = async () => {
+  // デバイス判定
+  useEffect(() => {
+    const ua = navigator.userAgent.toLowerCase();
+    if (/iphone|ipad|ipod/.test(ua)) {
+      setDeviceType("ios");
+    } else if (/android/.test(ua)) {
+      setDeviceType("android");
+    } else {
+      setDeviceType("pc");
+    }
+  }, []);
+
+  // ステップ進行
+  const nextStep = () => {
+    if (appState === "intro") setAppState("step1");
+    else if (appState === "step1") setAppState("step2");
+    else if (appState === "step2") setAppState("step3");
+    else if (appState === "step3") setAppState("micTest");
+  };
+
+  // マイクテスト開始
+  const startMicTest = async () => {
     try {
-      recorderRef.current = new AudioRecorder();
-      // まず権限だけ確認するのは難しいので、実際の開始時に行う
-      setAppState("countdown");
+      micTestRecorderRef.current = new AudioRecorder();
+      const analyserNode = await micTestRecorderRef.current.start();
+      setMicTestAnalyser(analyserNode);
     } catch (e) {
       console.error(e);
-      setErrorMsg("マイクへのアクセスが許可されていません。");
+      setErrorMsg("マイクへのアクセスが許可されていません。ブラウザの設定を確認してください。");
       setAppState("error");
     }
+  };
+
+  // マイクレベルの監視
+  useEffect(() => {
+    if (!micTestAnalyser || appState !== "micTest") return;
+
+    const dataArray = new Uint8Array(micTestAnalyser.frequencyBinCount);
+    let animationId: number;
+
+    const updateLevel = () => {
+      micTestAnalyser.getByteFrequencyData(dataArray);
+      const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+      setMicLevel(average);
+      animationId = requestAnimationFrame(updateLevel);
+    };
+
+    updateLevel();
+    return () => cancelAnimationFrame(animationId);
+  }, [micTestAnalyser, appState]);
+
+  // 録音開始へ進む
+  const proceedToRecording = async () => {
+    if (micTestRecorderRef.current) {
+      await micTestRecorderRef.current.stop();
+      micTestRecorderRef.current = null;
+      setMicTestAnalyser(null);
+    }
+
+    recorderRef.current = new AudioRecorder();
+    setAppState("countdown");
   };
 
   const startRecording = async () => {
@@ -61,7 +116,6 @@ export default function Home() {
       const result: AudioRecorderResult = await recorderRef.current.stop();
       const base64 = await blobToBase64(result.blob);
 
-      // 送信処理
       const response = await fetch("/api/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -85,45 +139,263 @@ export default function Home() {
   };
 
   const resetApp = () => {
-    setAppState("idle");
+    setAppState("intro");
     setErrorMsg("");
     setAnalyser(null);
+    setMicTestAnalyser(null);
+    setMicLevel(0);
   };
+
+  // デバイス別マイク許可ガイド
+  const getMicPermissionGuide = () => {
+    if (deviceType === "ios") {
+      return {
+        icon: <Smartphone className="w-8 h-8 md:w-10 md:h-10" />,
+        title: "iPhone / iPad",
+        steps: [
+          "ポップアップで「許可」をタップ",
+          "許可画面が出ない場合：",
+          "設定 → Safari → マイク → 許可"
+        ]
+      };
+    } else if (deviceType === "android") {
+      return {
+        icon: <Smartphone className="w-8 h-8 md:w-10 md:h-10" />,
+        title: "Android",
+        steps: [
+          "ポップアップで「許可」をタップ",
+          "許可画面が出ない場合：",
+          "設定 → アプリ → ブラウザ → 権限 → マイク → 許可"
+        ]
+      };
+    } else {
+      return {
+        icon: <Monitor className="w-8 h-8 md:w-10 md:h-10" />,
+        title: "パソコン",
+        steps: [
+          "アドレスバー左の🔒アイコンをクリック",
+          "「マイク」を「許可」に変更",
+          "ページを再読み込み"
+        ]
+      };
+    }
+  };
+
+  const permissionGuide = getMicPermissionGuide();
+
+  // 共通のフルスクリーンラッパー
+  const FullScreenWrapper = ({ children }: { children: React.ReactNode }) => (
+    <div className="fixed inset-0 z-50 bg-gray-950 flex flex-col items-center justify-center p-4 md:p-8 animate-[fadeIn_0.8s_ease-out]">
+      <style jsx>{`
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(20px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+      `}</style>
+      <div className="absolute inset-0 pointer-events-none overflow-hidden">
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[400px] md:w-[600px] h-[400px] md:h-[600px] bg-blue-900/10 rounded-full blur-[100px] md:blur-[120px]" />
+      </div>
+      <div className="z-10 w-full max-w-lg flex flex-col items-center text-center">
+        {children}
+      </div>
+    </div>
+  );
+
+  // 確認ボタン
+  const ConfirmButton = ({ onClick, text = "確認しました" }: { onClick: () => void; text?: string }) => (
+    <button
+      onClick={onClick}
+      className="w-full max-w-sm py-4 md:py-5 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-xl md:rounded-2xl font-bold text-lg md:text-xl hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-blue-900/30 hover:shadow-blue-900/50"
+    >
+      {text}
+      <ArrowRight className="w-5 h-5 md:w-6 md:h-6" />
+    </button>
+  );
 
   return (
     <main className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center p-4 relative overflow-hidden">
       {/* Background Decor */}
       <div className="absolute inset-0 pointer-events-none">
-        <div className="absolute top-[-20%] left-[-20%] w-[500px] h-[500px] bg-purple-900/20 rounded-full blur-[100px]" />
-        <div className="absolute bottom-[-20%] right-[-20%] w-[500px] h-[500px] bg-blue-900/20 rounded-full blur-[100px]" />
+        <div className="absolute top-[-20%] left-[-20%] w-[300px] md:w-[500px] h-[300px] md:h-[500px] bg-purple-900/20 rounded-full blur-[80px] md:blur-[100px]" />
+        <div className="absolute bottom-[-20%] right-[-20%] w-[300px] md:w-[500px] h-[300px] md:h-[500px] bg-blue-900/20 rounded-full blur-[80px] md:blur-[100px]" />
       </div>
 
-      <div className="z-10 w-full max-w-md flex flex-col items-center space-y-8 animate-in fade-in duration-700">
+      {/* State: INTRO */}
+      {appState === "intro" && (
+        <FullScreenWrapper>
+          <h1 className="text-3xl md:text-5xl lg:text-6xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 via-purple-400 to-blue-400 mb-6 md:mb-10">
+            声紋分析レコーダー
+          </h1>
+          <p className="text-lg md:text-2xl text-gray-300 mb-8 md:mb-12 leading-relaxed">
+            声紋分析のための<br />
+            <span className="text-white font-medium">高品質な音声録音</span>を行います
+          </p>
+          <ConfirmButton onClick={nextStep} text="はじめる" />
+        </FullScreenWrapper>
+      )}
 
-        {/* Header / Title */}
-        <h1 className="text-2xl md:text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400">
-          声紋分析レコーダー
-        </h1>
+      {/* State: STEP 1 */}
+      {appState === "step1" && (
+        <FullScreenWrapper>
+          <div className="text-blue-400 text-sm md:text-base mb-4 tracking-widest">STEP 1 / 3</div>
+          <h2 className="text-2xl md:text-4xl lg:text-5xl font-bold text-white mb-6 md:mb-10 leading-tight">
+            静かで落ち着いた<br />
+            <span className="text-cyan-400">環境</span>で行ってください
+          </h2>
+          <p className="text-base md:text-xl text-gray-400 mb-8 md:mb-12">
+            反響の少ない部屋が理想的です
+          </p>
+          <ConfirmButton onClick={nextStep} />
+        </FullScreenWrapper>
+      )}
 
-        {/* State: IDLE */}
-        {appState === "idle" && (
-          <div className="flex flex-col space-y-6 text-center bg-gray-900/50 p-6 rounded-2xl border border-gray-800 backdrop-blur-sm">
-            <div className="space-y-4 text-gray-300">
-              <p className="font-medium text-lg text-white">以下の手順で録音を行います</p>
-              <ul className="text-sm space-y-3 text-left list-disc list-inside bg-black/20 p-4 rounded-lg">
-                <li>静かで落ち着いた環境かつ、反響の少ない部屋で行ってください。</li>
-                <li>「自分の名前（フルネーム）」を約10秒間、繰り返し言い続けてください。</li>
-                <li className="text-gray-400 italic">例：「やまだ たろう... やまだ たろう...」</li>
-              </ul>
-            </div>
-            <button
-              onClick={initializeRecorder}
-              className="w-full py-4 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-xl font-bold text-lg hover:opacity-90 transition-opacity flex items-center justify-center gap-2 shadow-lg shadow-blue-900/20"
-            >
-              <Mic className="w-5 h-5" />
-              準備完了
-            </button>
+      {/* State: STEP 2 */}
+      {appState === "step2" && (
+        <FullScreenWrapper>
+          <div className="text-blue-400 text-sm md:text-base mb-4 tracking-widest">STEP 2 / 3</div>
+          <h2 className="text-2xl md:text-4xl lg:text-5xl font-bold text-white mb-6 md:mb-10 leading-tight">
+            <span className="text-purple-400">フルネーム</span>を<br />
+            繰り返してください
+          </h2>
+          <p className="text-base md:text-xl text-gray-400 mb-8 md:mb-12">
+            約10秒間、自然なペースで
+          </p>
+          <ConfirmButton onClick={nextStep} />
+        </FullScreenWrapper>
+      )}
+
+      {/* State: STEP 3 */}
+      {appState === "step3" && (
+        <FullScreenWrapper>
+          <div className="text-blue-400 text-sm md:text-base mb-4 tracking-widest">STEP 3 / 3</div>
+          <h2 className="text-2xl md:text-4xl lg:text-5xl font-bold text-white mb-6 md:mb-10 leading-tight">
+            例えば...
+          </h2>
+          <div className="bg-gray-900/50 backdrop-blur-sm rounded-2xl p-6 md:p-8 border border-gray-800 mb-8 md:mb-12">
+            <p className="text-xl md:text-3xl text-gray-300 italic">
+              「やまだ たろう...<br />
+              やまだ たろう...」
+            </p>
           </div>
+          <ConfirmButton onClick={nextStep} text="準備OK" />
+        </FullScreenWrapper>
+      )}
+
+      {/* State: MIC TEST */}
+      {appState === "micTest" && (
+        <FullScreenWrapper>
+          <h2 className="text-2xl md:text-4xl font-bold text-white mb-6 md:mb-8">
+            マイクの確認
+          </h2>
+
+          {!micTestAnalyser ? (
+            <div className="w-full space-y-6 md:space-y-8">
+              {/* マイク許可ガイド */}
+              <div className="bg-gray-900/50 backdrop-blur-sm rounded-2xl p-6 md:p-8 border border-gray-800">
+                <div className="flex items-center justify-center gap-3 text-cyan-400 mb-4 md:mb-6">
+                  {permissionGuide.icon}
+                  <span className="font-medium text-lg md:text-xl">{permissionGuide.title}</span>
+                </div>
+
+                <div className="space-y-3 md:space-y-4 text-left">
+                  {permissionGuide.steps.map((step, i) => (
+                    <div key={i} className="flex items-start gap-3">
+                      <span className="text-blue-400 font-bold text-sm md:text-base">{i + 1}.</span>
+                      <p className="text-sm md:text-base text-gray-300">{step}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <button
+                onClick={startMicTest}
+                className="w-full max-w-sm mx-auto py-4 md:py-5 bg-gradient-to-r from-cyan-600 to-blue-600 rounded-xl md:rounded-2xl font-bold text-lg md:text-xl hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-cyan-900/30"
+              >
+                <Mic className="w-5 h-5 md:w-6 md:h-6" />
+                マイクを許可する
+              </button>
+
+              {/* 他のデバイスもみる */}
+              <details className="text-gray-500 text-sm">
+                <summary className="cursor-pointer hover:text-gray-300 flex items-center gap-2 justify-center">
+                  <Settings className="w-4 h-4" />
+                  他のデバイスの設定方法
+                </summary>
+                <div className="mt-4 space-y-4 text-left bg-gray-900/30 p-4 rounded-xl">
+                  <div>
+                    <p className="text-cyan-400 font-medium mb-1">iPhone / iPad</p>
+                    <p className="text-xs text-gray-400">設定 → Safari → マイク → 許可</p>
+                  </div>
+                  <div>
+                    <p className="text-green-400 font-medium mb-1">Android</p>
+                    <p className="text-xs text-gray-400">設定 → アプリ → ブラウザ → 権限 → マイク</p>
+                  </div>
+                  <div>
+                    <p className="text-purple-400 font-medium mb-1">パソコン</p>
+                    <p className="text-xs text-gray-400">アドレスバー🔒 → マイク → 許可</p>
+                  </div>
+                </div>
+              </details>
+            </div>
+          ) : (
+            <div className="w-full space-y-6 md:space-y-8">
+              <div className="bg-gray-900/50 backdrop-blur-sm rounded-2xl p-6 md:p-8 border border-gray-800">
+                <div className="flex items-center justify-center gap-3 mb-4">
+                  <Volume2 className="w-6 h-6 md:w-8 md:h-8 text-cyan-400" />
+                  <span className="text-white font-medium text-lg md:text-xl">音声入力テスト</span>
+                </div>
+
+                <p className="text-sm md:text-base text-gray-400 mb-6">
+                  何か話してみてください
+                </p>
+
+                {/* レベルメーター */}
+                <div className="h-6 md:h-8 bg-gray-800 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 transition-all duration-100 rounded-full"
+                    style={{ width: `${Math.min(100, micLevel * 1.5)}%` }}
+                  />
+                </div>
+
+                <div className="mt-4 flex justify-center">
+                  {micLevel > 10 ? (
+                    <span className="text-green-400 text-sm md:text-base flex items-center gap-2">
+                      <CheckCircle2 className="w-5 h-5" />
+                      マイクが正常に動作しています
+                    </span>
+                  ) : (
+                    <span className="text-gray-500 text-sm md:text-base animate-pulse">
+                      音声を待機中...
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <button
+                onClick={proceedToRecording}
+                disabled={micLevel <= 5}
+                className={cn(
+                  "w-full max-w-sm mx-auto py-4 md:py-5 rounded-xl md:rounded-2xl font-bold text-lg md:text-xl transition-all flex items-center justify-center gap-2 shadow-lg",
+                  micLevel > 5
+                    ? "bg-gradient-to-r from-blue-600 to-indigo-600 hover:opacity-90 shadow-blue-900/30"
+                    : "bg-gray-700 text-gray-400 cursor-not-allowed"
+                )}
+              >
+                録音を開始する
+                <ArrowRight className="w-5 h-5 md:w-6 md:h-6" />
+              </button>
+            </div>
+          )}
+        </FullScreenWrapper>
+      )}
+
+      <div className="z-10 w-full max-w-md flex flex-col items-center space-y-6 md:space-y-8">
+
+        {/* Header (メイン画面用) */}
+        {!["intro", "step1", "step2", "step3", "micTest"].includes(appState) && (
+          <h1 className="text-2xl md:text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400">
+            声紋分析レコーダー
+          </h1>
         )}
 
         {/* State: COUNTDOWN */}
@@ -134,12 +406,12 @@ export default function Home() {
         {/* State: RECORDING */}
         {appState === "recording" && (
           <div className="w-full flex flex-col items-center space-y-6">
-            <div className="text-cyan-400 font-medium animate-pulse">
+            <div className="text-cyan-400 font-medium text-lg md:text-xl animate-pulse">
               10秒間、名前を繰り返してください...
             </div>
             {analyser && <AudioVisualizer analyser={analyser} isRecording={true} />}
-            <div className="w-full h-2 bg-gray-800 rounded-full overflow-hidden">
-              <div className="h-full bg-cyan-500 animate-[width_10s_linear_forwards] w-0" style={{ animationName: 'progress', animationDuration: '10s', animationTimingFunction: 'linear', animationFillMode: 'forwards' }} />
+            <div className="w-full h-3 md:h-4 bg-gray-800 rounded-full overflow-hidden">
+              <div className="h-full bg-cyan-500" style={{ animation: 'progress 10s linear forwards' }} />
               <style jsx>{`
                  @keyframes progress {
                    from { width: 0%; }
@@ -152,24 +424,24 @@ export default function Home() {
 
         {/* State: UPLOADING */}
         {appState === "uploading" && (
-          <div className="flex flex-col items-center space-y-4">
-            <Loader2 className="w-16 h-16 text-blue-500 animate-spin" />
-            <p className="text-lg font-medium">Googleドライブへ保存中...</p>
-            <p className="text-sm text-gray-500">この処理には数秒かかる場合があります</p>
+          <div className="flex flex-col items-center space-y-4 md:space-y-6">
+            <Loader2 className="w-16 h-16 md:w-20 md:h-20 text-blue-500 animate-spin" />
+            <p className="text-lg md:text-2xl font-medium">Googleドライブへ保存中...</p>
+            <p className="text-sm md:text-base text-gray-500">この処理には数秒かかる場合があります</p>
           </div>
         )}
 
         {/* State: COMPLETED */}
         {appState === "completed" && (
-          <div className="flex flex-col items-center space-y-6 bg-green-950/20 p-8 rounded-3xl border border-green-900/50">
-            <CheckCircle2 className="w-20 h-20 text-green-500 animate-bounce" />
+          <div className="flex flex-col items-center space-y-6 md:space-y-8 bg-green-950/20 p-8 md:p-12 rounded-3xl border border-green-900/50">
+            <CheckCircle2 className="w-20 h-20 md:w-24 md:h-24 text-green-500 animate-bounce" />
             <div className="text-center">
-              <h2 className="text-2xl font-bold text-green-400 mb-2">保存完了</h2>
-              <p className="text-gray-300">声紋データの送信が完了しました。<br />ご協力ありがとうございました。</p>
+              <h2 className="text-2xl md:text-3xl font-bold text-green-400 mb-3">保存完了</h2>
+              <p className="text-gray-300 text-base md:text-lg">声紋データの送信が完了しました。<br />ご協力ありがとうございました。</p>
             </div>
             <button
               onClick={resetApp}
-              className="px-6 py-2 bg-gray-800 rounded-full text-sm font-medium hover:bg-gray-700 transition-colors"
+              className="px-6 py-3 bg-gray-800 rounded-full text-sm md:text-base font-medium hover:bg-gray-700 transition-colors"
             >
               最初の画面に戻る
             </button>
@@ -178,15 +450,15 @@ export default function Home() {
 
         {/* State: ERROR */}
         {appState === "error" && (
-          <div className="flex flex-col items-center space-y-6 bg-red-950/20 p-8 rounded-3xl border border-red-900/50">
-            <AlertCircle className="w-20 h-20 text-red-500" />
+          <div className="flex flex-col items-center space-y-6 bg-red-950/20 p-8 md:p-10 rounded-3xl border border-red-900/50">
+            <AlertCircle className="w-20 h-20 md:w-24 md:h-24 text-red-500" />
             <div className="text-center">
-              <h2 className="text-xl font-bold text-red-400 mb-2">エラーが発生しました</h2>
-              <p className="text-gray-300">{errorMsg || "不明なエラーです"}</p>
+              <h2 className="text-xl md:text-2xl font-bold text-red-400 mb-2">エラーが発生しました</h2>
+              <p className="text-gray-300 text-base md:text-lg">{errorMsg || "不明なエラーです"}</p>
             </div>
             <button
               onClick={resetApp}
-              className="w-full py-3 bg-red-600 rounded-xl font-bold hover:bg-red-700 transition-colors"
+              className="w-full max-w-sm py-4 bg-red-600 rounded-xl font-bold text-lg hover:bg-red-700 transition-colors"
             >
               もう一度試す
             </button>
