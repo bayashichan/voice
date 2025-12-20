@@ -22,6 +22,7 @@ export default function Home() {
   const [deviceType, setDeviceType] = useState<DeviceType>("pc");
   const [userName, setUserName] = useState<string>("");
   const isComposingRef = useRef<boolean>(false);
+  const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
 
   // デバイス判定
   useEffect(() => {
@@ -102,6 +103,9 @@ export default function Home() {
       // Step 1: 録音停止
       step = "録音停止";
       const result: AudioRecorderResult = await recorderRef.current.stop();
+
+      // 録音データを保存（エラー時のダウンロード用）
+      setRecordedBlob(result.blob);
 
       // Step 2: Base64エンコード
       step = "データ変換";
@@ -559,6 +563,23 @@ export default function Home() {
               <h2 className="text-xl md:text-2xl font-bold text-red-400 mb-2">エラーが発生しました</h2>
               <p className="text-gray-300 text-base md:text-lg">{errorMsg || "不明なエラーです"}</p>
             </div>
+
+            {/* 録音データがある場合はダウンロードボタンを表示 */}
+            {recordedBlob && (
+              <div className="w-full max-w-sm space-y-3">
+                <p className="text-sm text-yellow-400 text-center">
+                  📱 iPhoneをお使いの場合は、下のボタンで録音をダウンロードしてLINEで送信してください
+                </p>
+                <a
+                  href={URL.createObjectURL(recordedBlob)}
+                  download={`${userName || 'voice'}_${new Date().toISOString().slice(0, 10)}.webm`}
+                  className="block w-full py-3 bg-blue-600 rounded-xl font-bold text-center text-lg hover:bg-blue-700 transition-colors"
+                >
+                  録音をダウンロード
+                </a>
+              </div>
+            )}
+
             <button
               onClick={resetApp}
               className="w-full max-w-sm py-4 bg-red-600 rounded-xl font-bold text-lg hover:bg-red-700 transition-colors"
