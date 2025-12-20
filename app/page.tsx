@@ -478,22 +478,29 @@ export default function Home() {
                 ご協力ありがとうございました。
               </p>
             </div>
+
+            {/* メインメッセージ: ブラウザを閉じてOK */}
+            <div className="w-full max-w-sm bg-green-900/30 border border-green-700/50 rounded-xl p-4 text-center">
+              <p className="text-green-300 font-medium text-base md:text-lg">
+                ✓ このままブラウザを閉じてOKです
+              </p>
+            </div>
+
             <p className="text-xs md:text-sm text-gray-500 text-center">
               ※ 音声データは分析完了後、速やかに削除いたします
             </p>
 
-            <div className="w-full max-w-sm space-y-3">
+            {/* やり直しボタン - 控えめに */}
+            <div className="w-full max-w-sm pt-4 border-t border-gray-800">
+              <p className="text-xs text-gray-500 text-center mb-2">
+                録音をやり直したい場合のみ
+              </p>
               <button
                 onClick={retryRecording}
-                className="w-full py-3 bg-orange-600 rounded-xl font-bold text-base hover:bg-orange-700 transition-colors"
+                className="w-full py-2 bg-gray-700 rounded-lg text-sm text-gray-300 hover:bg-gray-600 transition-colors"
               >
-                もう一度録音し直す
+                録音し直す
               </button>
-
-              <p className="text-xs md:text-sm text-gray-400 text-center">
-                録音し直す必要がない場合は<br />
-                このままブラウザを閉じてください
-              </p>
             </div>
 
             <div className="text-xs text-gray-600 mt-4">
