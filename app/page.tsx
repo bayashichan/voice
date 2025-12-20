@@ -8,7 +8,7 @@ import { AudioVisualizer } from "@/components/AudioVisualizer";
 import { blobToBase64 } from "@/utils/fileHelpers";
 import { cn } from "@/utils/cn";
 
-type AppState = "intro" | "privacy" | "step1" | "step2" | "step3" | "nameInput" | "micTest" | "countdown" | "recording" | "uploading" | "completed" | "error";
+type AppState = "intro" | "privacy" | "step1" | "step2" | "step3" | "nameInput" | "micTest" | "countdown" | "recording" | "uploading" | "completed" | "iosDownload" | "error";
 type DeviceType = "ios" | "android" | "pc";
 
 export default function Home() {
@@ -104,8 +104,14 @@ export default function Home() {
       step = "録音停止";
       const result: AudioRecorderResult = await recorderRef.current.stop();
 
-      // 録音データを保存（エラー時のダウンロード用）
+      // 録音データを保存（ダウンロード用）
       setRecordedBlob(result.blob);
+
+      // iOSの場合はアップロードせずダウンロード画面へ
+      if (deviceType === "ios") {
+        setAppState("iosDownload");
+        return;
+      }
 
       // Step 2: Base64エンコード
       step = "データ変換";
@@ -540,6 +546,54 @@ export default function Home() {
             <div className="w-full max-w-sm pt-4 border-t border-gray-800">
               <p className="text-xs text-gray-500 text-center mb-2">
                 録音をやり直したい場合のみ
+              </p>
+              <button
+                onClick={retryRecording}
+                className="w-full py-2 bg-gray-700 rounded-lg text-sm text-gray-300 hover:bg-gray-600 transition-colors"
+              >
+                録音し直す
+              </button>
+            </div>
+
+            <div className="text-xs text-gray-600 mt-4">
+              © 声紋分析コーチ若林
+            </div>
+          </div>
+        )}
+
+        {/* State: iOS DOWNLOAD - iPhoneユーザー用ダウンロード画面 */}
+        {appState === "iosDownload" && recordedBlob && (
+          <div className="flex flex-col items-center space-y-6 md:space-y-8 bg-blue-950/20 p-8 md:p-12 rounded-3xl border border-blue-900/50">
+            <CheckCircle2 className="w-20 h-20 md:w-24 md:h-24 text-blue-500" />
+            <div className="text-center">
+              <h2 className="text-2xl md:text-3xl font-bold text-blue-400 mb-3">録音完了！</h2>
+              <p className="text-gray-300 text-base md:text-lg">
+                {userName}さんの声紋を録音しました
+              </p>
+            </div>
+
+            <div className="w-full max-w-sm bg-blue-900/30 border border-blue-700/50 rounded-xl p-4 text-center space-y-4">
+              <p className="text-blue-300 font-medium text-base md:text-lg">
+                📱 下のボタンでダウンロードして<br />
+                LINEで若林に送信してください
+              </p>
+              <a
+                href={URL.createObjectURL(recordedBlob)}
+                download={`${userName || 'voice'}_${new Date().toISOString().slice(0, 10)}.wav`}
+                className="block w-full py-4 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-xl font-bold text-lg hover:opacity-90 transition-all shadow-lg shadow-blue-900/30"
+              >
+                録音をダウンロード
+              </a>
+            </div>
+
+            <p className="text-xs md:text-sm text-gray-400 text-center">
+              ダウンロード後、「ファイル」アプリから<br />
+              LINEで若林に共有してください
+            </p>
+
+            <div className="w-full max-w-sm pt-4 border-t border-gray-800">
+              <p className="text-xs text-gray-500 text-center mb-2">
+                録音をやり直したい場合
               </p>
               <button
                 onClick={retryRecording}
