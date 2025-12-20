@@ -42,56 +42,22 @@ export default function Home() {
     else if (appState === "step3") setAppState("micTest");
   };
 
-  // マイクテスト開始
-  const startMicTest = async () => {
+  // マイク許可を取得して録音へ進む（シンプル版）
+  const requestMicPermissionAndProceed = async () => {
     try {
-      micTestRecorderRef.current = new AudioRecorder();
-      const analyserNode = await micTestRecorderRef.current.start();
-      setMicTestAnalyser(analyserNode);
+      // マイク許可だけを取得
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // 許可が取れたらすぐにストリームを停止
+      stream.getTracks().forEach(track => track.stop());
+
+      // 許可が取れたのでカウントダウンへ
+      recorderRef.current = new AudioRecorder();
+      setAppState("countdown");
     } catch (e) {
       console.error(e);
       setErrorMsg("マイクへのアクセスが許可されていません。ブラウザの設定を確認してください。");
       setAppState("error");
     }
-  };
-
-  // マイクレベルの監視
-  useEffect(() => {
-    if (!micTestAnalyser || appState !== "micTest") return;
-
-    const dataArray = new Uint8Array(micTestAnalyser.frequencyBinCount);
-    let animationId: number;
-
-    const updateLevel = () => {
-      micTestAnalyser.getByteFrequencyData(dataArray);
-      const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-      setMicLevel(average);
-      animationId = requestAnimationFrame(updateLevel);
-    };
-
-    updateLevel();
-    return () => cancelAnimationFrame(animationId);
-  }, [micTestAnalyser, appState]);
-
-  // 録音開始へ進む
-  const proceedToRecording = async () => {
-    try {
-      if (micTestRecorderRef.current) {
-        try {
-          await micTestRecorderRef.current.stop();
-        } catch (stopError) {
-          console.warn("Failed to stop mic test recorder:", stopError);
-        }
-        micTestRecorderRef.current = null;
-        setMicTestAnalyser(null);
-      }
-    } catch (e) {
-      console.warn("Error cleaning up mic test:", e);
-    }
-
-    // 新しいレコーダーを作成してカウントダウンへ
-    recorderRef.current = new AudioRecorder();
-    setAppState("countdown");
   };
 
   const startRecording = async () => {
@@ -334,105 +300,66 @@ export default function Home() {
         </FullScreenWrapper>
       )}
 
-      {/* State: MIC TEST */}
+      {/* State: MIC TEST - シンプル版 */}
       {appState === "micTest" && (
         <FullScreenWrapper>
           <h2 className="text-2xl md:text-4xl font-bold text-white mb-6 md:mb-8">
-            マイクの確認
+            マイクの許可
           </h2>
 
-          {!micTestAnalyser ? (
-            <div className="w-full space-y-6 md:space-y-8">
-              {/* マイク許可ガイド */}
-              <div className="bg-gray-900/50 backdrop-blur-sm rounded-2xl p-6 md:p-8 border border-gray-800">
-                <div className="flex items-center justify-center gap-3 text-cyan-400 mb-4 md:mb-6">
-                  {permissionGuide.icon}
-                  <span className="font-medium text-lg md:text-xl">{permissionGuide.title}</span>
-                </div>
-
-                <div className="space-y-3 md:space-y-4 text-left">
-                  {permissionGuide.steps.map((step, i) => (
-                    <div key={i} className="flex items-start gap-3">
-                      <span className="text-blue-400 font-bold text-sm md:text-base">{i + 1}.</span>
-                      <p className="text-sm md:text-base text-gray-300">{step}</p>
-                    </div>
-                  ))}
-                </div>
+          <div className="w-full space-y-6 md:space-y-8">
+            {/* マイク許可ガイド */}
+            <div className="bg-gray-900/50 backdrop-blur-sm rounded-2xl p-6 md:p-8 border border-gray-800">
+              <div className="flex items-center justify-center gap-3 text-cyan-400 mb-4 md:mb-6">
+                {permissionGuide.icon}
+                <span className="font-medium text-lg md:text-xl">{permissionGuide.title}</span>
               </div>
 
-              <button
-                onClick={startMicTest}
-                className="w-full max-w-sm mx-auto py-4 md:py-5 bg-gradient-to-r from-cyan-600 to-blue-600 rounded-xl md:rounded-2xl font-bold text-lg md:text-xl hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-cyan-900/30"
-              >
-                <Mic className="w-5 h-5 md:w-6 md:h-6" />
-                マイクを許可する
-              </button>
+              <p className="text-sm md:text-base text-gray-400 mb-4 text-center">
+                ボタンを押すとマイクの許可を求められます。<br />
+                「許可」を選択してください。
+              </p>
 
-              {/* 他のデバイスもみる */}
-              <details className="text-gray-500 text-sm">
-                <summary className="cursor-pointer hover:text-gray-300 flex items-center gap-2 justify-center">
-                  <Settings className="w-4 h-4" />
-                  他のデバイスの設定方法
-                </summary>
-                <div className="mt-4 space-y-4 text-left bg-gray-900/30 p-4 rounded-xl">
-                  <div>
-                    <p className="text-cyan-400 font-medium mb-1">iPhone / iPad</p>
-                    <p className="text-xs text-gray-400">設定 → Safari → マイク → 許可</p>
+              <div className="space-y-3 md:space-y-4 text-left">
+                {permissionGuide.steps.map((step, i) => (
+                  <div key={i} className="flex items-start gap-3">
+                    <span className="text-blue-400 font-bold text-sm md:text-base">{i + 1}.</span>
+                    <p className="text-sm md:text-base text-gray-300">{step}</p>
                   </div>
-                  <div>
-                    <p className="text-green-400 font-medium mb-1">Android</p>
-                    <p className="text-xs text-gray-400">設定 → アプリ → ブラウザ → 権限 → マイク</p>
-                  </div>
-                  <div>
-                    <p className="text-purple-400 font-medium mb-1">パソコン</p>
-                    <p className="text-xs text-gray-400">アドレスバー🔒 → マイク → 許可</p>
-                  </div>
-                </div>
-              </details>
+                ))}
+              </div>
             </div>
-          ) : (
-            <div className="w-full space-y-6 md:space-y-8">
-              <div className="bg-gray-900/50 backdrop-blur-sm rounded-2xl p-6 md:p-8 border border-gray-800">
-                <div className="flex items-center justify-center gap-3 mb-4">
-                  <Volume2 className="w-6 h-6 md:w-8 md:h-8 text-cyan-400" />
-                  <span className="text-white font-medium text-lg md:text-xl">音声入力テスト</span>
+
+            <button
+              onClick={requestMicPermissionAndProceed}
+              className="w-full max-w-sm mx-auto py-4 md:py-5 bg-gradient-to-r from-cyan-600 to-blue-600 rounded-xl md:rounded-2xl font-bold text-lg md:text-xl hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-cyan-900/30"
+            >
+              <Mic className="w-5 h-5 md:w-6 md:h-6" />
+              マイクを許可して録音開始
+            </button>
+
+            {/* 他のデバイスもみる */}
+            <details className="text-gray-500 text-sm">
+              <summary className="cursor-pointer hover:text-gray-300 flex items-center gap-2 justify-center">
+                <Settings className="w-4 h-4" />
+                他のデバイスの設定方法
+              </summary>
+              <div className="mt-4 space-y-4 text-left bg-gray-900/30 p-4 rounded-xl">
+                <div>
+                  <p className="text-cyan-400 font-medium mb-1">iPhone / iPad</p>
+                  <p className="text-xs text-gray-400">設定 → Safari → マイク → 許可</p>
                 </div>
-
-                <p className="text-sm md:text-base text-gray-400 mb-6">
-                  何か話してみてください
-                </p>
-
-                {/* レベルメーター */}
-                <div className="h-6 md:h-8 bg-gray-800 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 transition-all duration-100 rounded-full"
-                    style={{ width: `${Math.min(100, micLevel * 1.5)}%` }}
-                  />
+                <div>
+                  <p className="text-green-400 font-medium mb-1">Android</p>
+                  <p className="text-xs text-gray-400">設定 → アプリ → ブラウザ → 権限 → マイク</p>
                 </div>
-
-                <div className="mt-4 flex justify-center">
-                  {micLevel > 10 ? (
-                    <span className="text-green-400 text-sm md:text-base flex items-center gap-2">
-                      <CheckCircle2 className="w-5 h-5" />
-                      マイクが正常に動作しています
-                    </span>
-                  ) : (
-                    <span className="text-gray-500 text-sm md:text-base animate-pulse">
-                      音声を待機中...
-                    </span>
-                  )}
+                <div>
+                  <p className="text-purple-400 font-medium mb-1">パソコン</p>
+                  <p className="text-xs text-gray-400">アドレスバー🔒 → マイク → 許可</p>
                 </div>
               </div>
-
-              <button
-                onClick={proceedToRecording}
-                className="w-full max-w-sm mx-auto py-4 md:py-5 rounded-xl md:rounded-2xl font-bold text-lg md:text-xl transition-all flex items-center justify-center gap-2 shadow-lg bg-gradient-to-r from-blue-600 to-indigo-600 hover:opacity-90 shadow-blue-900/30"
-              >
-                録音を開始する
-                <ArrowRight className="w-5 h-5 md:w-6 md:h-6" />
-              </button>
-            </div>
-          )}
+            </details>
+          </div>
         </FullScreenWrapper>
       )}
 
