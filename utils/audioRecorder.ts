@@ -10,7 +10,7 @@ export class AudioRecorder {
   private source: MediaStreamAudioSourceNode | null = null;
   private leftChannelData: Float32Array[] = [];
   private recordingLength = 0;
-  private sampleRate = 44100;
+  private sampleRate = 44100; // デフォルト値、実際のデバイスのサンプルレートで上書きされる
   private analyser: AnalyserNode | null = null;
 
   async start(): Promise<AnalyserNode> {
@@ -18,9 +18,13 @@ export class AudioRecorder {
     this.recordingLength = 0;
 
     this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    this.audioContext = new AudioContext({ sampleRate: this.sampleRate });
+
+    // iOS対応: サンプルレートを指定せずにAudioContextを作成し、デバイスのネイティブサンプルレートを使用
+    this.audioContext = new AudioContext();
+    this.sampleRate = this.audioContext.sampleRate; // デバイスの実際のサンプルレートを取得
+
     this.source = this.audioContext.createMediaStreamSource(this.mediaStream);
-    
+
     // アナライザーの設定（ビジュアライザー用）
     this.analyser = this.audioContext.createAnalyser();
     this.analyser.fftSize = 2048;
@@ -29,7 +33,7 @@ export class AudioRecorder {
     // 録音処理用のノード (DeprecatedだがSafari互換性のためScriptProcessorを使用)
     // AudioWorkletへの移行が推奨されるが、簡易実装としてこちらを選択
     this.processor = this.audioContext.createScriptProcessor(4096, 1, 1);
-    
+
     this.processor.onaudioprocess = (e) => {
       const left = e.inputBuffer.getChannelData(0);
       // データのコピーを作成して保存
