@@ -83,13 +83,13 @@ export default function Home() {
     }
   };
 
-  // 5秒タイマー（iOSのファイルサイズ制限対策で短縮）
+  // 10秒タイマー
   useEffect(() => {
     let timer: NodeJS.Timeout;
     if (appState === "recording") {
       timer = setTimeout(async () => {
         await stopAndUpload();
-      }, 5000); // 5秒に短縮
+      }, 10000); // 10秒
     }
     return () => clearTimeout(timer);
   }, [appState]);
@@ -157,21 +157,8 @@ export default function Home() {
 
     } catch (e: unknown) {
       console.error(`エラー発生場所: ${step}`, e);
-
-      let errorMessage = `${step}中にエラーが発生しました。`;
-
-      if (e instanceof Error) {
-        if (e.name === "AbortError") {
-          errorMessage = "通信がタイムアウトしました。Wi-Fi接続を試すか、電波の良い場所で再試行してください。";
-        } else if (e.message.includes("NetworkError") || e.message.includes("Failed to fetch")) {
-          errorMessage = "ネットワーク接続エラー。インターネット接続を確認してください。";
-        } else {
-          errorMessage += ` (${e.message})`;
-        }
-      }
-
-      setErrorMsg(errorMessage);
-      setAppState("error");
+      // エラーの場合はダウンロード画面を表示（エラーメッセージは表示しない）
+      setAppState("iosDownload");
     }
   };
 
@@ -499,7 +486,7 @@ export default function Home() {
             </div>
             {analyser && <AudioVisualizer analyser={analyser} isRecording={true} />}
             <div className="w-full h-3 md:h-4 bg-gray-800 rounded-full overflow-hidden">
-              <div className="h-full bg-cyan-500" style={{ animation: 'progress 5s linear forwards' }} />
+              <div className="h-full bg-cyan-500" style={{ animation: 'progress 10s linear forwards' }} />
               <style jsx>{`
                  @keyframes progress {
                    from { width: 0%; }
