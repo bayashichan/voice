@@ -316,41 +316,46 @@ export default function Home() {
         </FullScreenWrapper>
       )}
 
-      {/* State: NAME INPUT - 名前入力 */}
+      {/* State: NAME INPUT - 名前入力（アニメーションなし） */}
       {appState === "nameInput" && (
-        <FullScreenWrapper>
-          <h2 className="text-2xl md:text-4xl font-bold text-white mb-6 md:mb-8">
-            お名前を入力してください
-          </h2>
-          <p className="text-sm md:text-base text-gray-400 mb-6">
-            録音データの識別に使用します
-          </p>
-
-          <div className="w-full max-w-sm space-y-6">
-            <input
-              type="text"
-              defaultValue=""
-              onChange={(e) => setUserName(e.target.value)}
-              placeholder="例：山田太郎"
-              className="w-full px-4 py-4 bg-gray-900/80 border border-gray-700 rounded-xl text-white text-lg md:text-xl text-center placeholder-gray-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500"
-              autoFocus
-            />
-
-            <button
-              onClick={proceedToMicTest}
-              disabled={userName.trim().length === 0}
-              className={cn(
-                "w-full py-4 md:py-5 rounded-xl md:rounded-2xl font-bold text-lg md:text-xl transition-all flex items-center justify-center gap-2 shadow-lg",
-                userName.trim().length > 0
-                  ? "bg-gradient-to-r from-blue-600 to-indigo-600 hover:opacity-90 shadow-blue-900/30"
-                  : "bg-gray-700 text-gray-400 cursor-not-allowed"
-              )}
-            >
-              次へ
-              <ArrowRight className="w-5 h-5 md:w-6 md:h-6" />
-            </button>
+        <div className="fixed inset-0 z-50 bg-gray-950 flex flex-col items-center justify-center p-4 md:p-8">
+          <div className="absolute inset-0 pointer-events-none overflow-hidden">
+            <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[400px] md:w-[600px] h-[400px] md:h-[600px] bg-blue-900/10 rounded-full blur-[100px] md:blur-[120px]" />
           </div>
-        </FullScreenWrapper>
+          <div className="z-10 w-full max-w-lg flex flex-col items-center text-center">
+            <h2 className="text-2xl md:text-4xl font-bold text-white mb-6 md:mb-8">
+              お名前を入力してください
+            </h2>
+            <p className="text-sm md:text-base text-gray-400 mb-6">
+              録音データの識別に使用します
+            </p>
+
+            <div className="w-full max-w-sm space-y-6">
+              <input
+                type="text"
+                defaultValue=""
+                onChange={(e) => setUserName(e.target.value)}
+                placeholder="例：山田太郎"
+                className="w-full px-4 py-4 bg-gray-900/80 border border-gray-700 rounded-xl text-white text-lg md:text-xl text-center placeholder-gray-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500"
+                autoFocus
+              />
+
+              <button
+                onClick={proceedToMicTest}
+                disabled={userName.trim().length === 0}
+                className={cn(
+                  "w-full py-4 md:py-5 rounded-xl md:rounded-2xl font-bold text-lg md:text-xl transition-all flex items-center justify-center gap-2 shadow-lg",
+                  userName.trim().length > 0
+                    ? "bg-gradient-to-r from-blue-600 to-indigo-600 hover:opacity-90 shadow-blue-900/30"
+                    : "bg-gray-700 text-gray-400 cursor-not-allowed"
+                )}
+              >
+                次へ
+                <ArrowRight className="w-5 h-5 md:w-6 md:h-6" />
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* State: MIC TEST - シンプル版 */}
