@@ -1,14 +1,14 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Mic, CheckCircle2, AlertCircle, Loader2, Volume2, ArrowRight, Smartphone, Monitor, Settings } from "lucide-react";
+import { Mic, CheckCircle2, AlertCircle, Loader2, Volume2, ArrowRight, Smartphone, Monitor, Settings, Shield } from "lucide-react";
 import { AudioRecorder, AudioRecorderResult } from "@/utils/audioRecorder";
 import { GlowCountdown } from "@/components/GlowCountdown";
 import { AudioVisualizer } from "@/components/AudioVisualizer";
 import { blobToBase64 } from "@/utils/fileHelpers";
 import { cn } from "@/utils/cn";
 
-type AppState = "intro" | "step1" | "step2" | "step3" | "micTest" | "countdown" | "recording" | "uploading" | "completed" | "error";
+type AppState = "intro" | "privacy" | "step1" | "step2" | "step3" | "micTest" | "countdown" | "recording" | "uploading" | "completed" | "error";
 type DeviceType = "ios" | "android" | "pc";
 
 export default function Home() {
@@ -35,7 +35,8 @@ export default function Home() {
 
   // ステップ進行
   const nextStep = () => {
-    if (appState === "intro") setAppState("step1");
+    if (appState === "intro") setAppState("privacy");
+    else if (appState === "privacy") setAppState("step1");
     else if (appState === "step1") setAppState("step2");
     else if (appState === "step2") setAppState("step3");
     else if (appState === "step3") setAppState("micTest");
@@ -231,6 +232,48 @@ export default function Home() {
             <span className="text-white font-medium">高品質な音声録音</span>を行います
           </p>
           <ConfirmButton onClick={nextStep} text="はじめる" />
+
+          {/* フッター */}
+          <div className="absolute bottom-4 md:bottom-6 left-0 right-0 text-center text-xs md:text-sm text-gray-600">
+            © 声紋分析コーチ若林
+          </div>
+        </FullScreenWrapper>
+      )}
+
+      {/* State: PRIVACY - プライバシーポリシー */}
+      {appState === "privacy" && (
+        <FullScreenWrapper>
+          <div className="flex items-center justify-center gap-3 text-cyan-400 mb-6">
+            <Shield className="w-8 h-8 md:w-10 md:h-10" />
+          </div>
+          <h2 className="text-2xl md:text-4xl font-bold text-white mb-6 md:mb-8">
+            プライバシーについて
+          </h2>
+          <div className="bg-gray-900/50 backdrop-blur-sm rounded-2xl p-6 md:p-8 border border-gray-800 text-left space-y-4 mb-8">
+            <div className="flex items-start gap-3">
+              <CheckCircle2 className="w-5 h-5 text-green-400 mt-0.5 flex-shrink-0" />
+              <p className="text-sm md:text-base text-gray-300">
+                録音した音声データは<span className="text-white font-medium">声紋分析のためだけ</span>に使用します
+              </p>
+            </div>
+            <div className="flex items-start gap-3">
+              <CheckCircle2 className="w-5 h-5 text-green-400 mt-0.5 flex-shrink-0" />
+              <p className="text-sm md:text-base text-gray-300">
+                他の目的への<span className="text-white font-medium">流用は一切いたしません</span>
+              </p>
+            </div>
+            <div className="flex items-start gap-3">
+              <CheckCircle2 className="w-5 h-5 text-green-400 mt-0.5 flex-shrink-0" />
+              <p className="text-sm md:text-base text-gray-300">
+                分析完了後、音声データは<span className="text-white font-medium">速やかに削除</span>いたします
+              </p>
+            </div>
+          </div>
+          <ConfirmButton onClick={nextStep} text="同意して続ける" />
+
+          <div className="absolute bottom-4 md:bottom-6 left-0 right-0 text-center text-xs md:text-sm text-gray-600">
+            © 声紋分析コーチ若林
+          </div>
         </FullScreenWrapper>
       )}
 
@@ -439,12 +482,18 @@ export default function Home() {
               <h2 className="text-2xl md:text-3xl font-bold text-green-400 mb-3">保存完了</h2>
               <p className="text-gray-300 text-base md:text-lg">声紋データの送信が完了しました。<br />ご協力ありがとうございました。</p>
             </div>
+            <p className="text-xs md:text-sm text-gray-500 text-center">
+              ※ 音声データは分析完了後、速やかに削除いたします
+            </p>
             <button
               onClick={resetApp}
               className="px-6 py-3 bg-gray-800 rounded-full text-sm md:text-base font-medium hover:bg-gray-700 transition-colors"
             >
               最初の画面に戻る
             </button>
+            <div className="text-xs text-gray-600 mt-4">
+              © 声紋分析コーチ若林
+            </div>
           </div>
         )}
 
