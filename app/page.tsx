@@ -75,12 +75,21 @@ export default function Home() {
 
   // 録音開始へ進む
   const proceedToRecording = async () => {
-    if (micTestRecorderRef.current) {
-      await micTestRecorderRef.current.stop();
-      micTestRecorderRef.current = null;
-      setMicTestAnalyser(null);
+    try {
+      if (micTestRecorderRef.current) {
+        try {
+          await micTestRecorderRef.current.stop();
+        } catch (stopError) {
+          console.warn("Failed to stop mic test recorder:", stopError);
+        }
+        micTestRecorderRef.current = null;
+        setMicTestAnalyser(null);
+      }
+    } catch (e) {
+      console.warn("Error cleaning up mic test:", e);
     }
 
+    // 新しいレコーダーを作成してカウントダウンへ
     recorderRef.current = new AudioRecorder();
     setAppState("countdown");
   };
