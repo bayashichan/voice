@@ -97,28 +97,58 @@ export default function Home() {
     if (!recorderRef.current) return;
     setAppState("uploading");
 
+    let step = "録音処理";
     try {
+      // Step 1: 録音停止
+      step = "録音停止";
       const result: AudioRecorderResult = await recorderRef.current.stop();
+
+      // Step 2: Base64エンコード
+      step = "データ変換";
       const base64 = await blobToBase64(result.blob);
+
+      // Step 3: アップロード
+      step = "サーバー送信";
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30秒タイムアウト
 
       const response = await fetch("/api/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ fileData: base64, mimeType: "audio/wav", userName: userName }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
 
-      if (!response.ok) throw new Error("Server error");
+      if (!response.ok) {
+        throw new Error(`サーバーエラー (${response.status})`);
+      }
 
+      // Step 4: レスポンス確認
+      step = "保存確認";
       const data = await response.json();
       if (data.result === "success") {
         setAppState("completed");
       } else {
-        throw new Error("Upload failed verification");
+        throw new Error(data.message || "保存確認に失敗");
       }
 
-    } catch (e) {
-      console.error(e);
-      setErrorMsg("保存に失敗しました。ネットワーク接続を確認して再試行してください。");
+    } catch (e: unknown) {
+      console.error(`エラー発生場所: ${step}`, e);
+
+      let errorMessage = `${step}中にエラーが発生しました。`;
+
+      if (e instanceof Error) {
+        if (e.name === "AbortError") {
+          errorMessage = "通信がタイムアウトしました。Wi-Fi接続を試すか、電波の良い場所で再試行してください。";
+        } else if (e.message.includes("NetworkError") || e.message.includes("Failed to fetch")) {
+          errorMessage = "ネットワーク接続エラー。インターネット接続を確認してください。";
+        } else {
+          errorMessage += ` (${e.message})`;
+        }
+      }
+
+      setErrorMsg(errorMessage);
       setAppState("error");
     }
   };
