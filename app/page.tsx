@@ -382,6 +382,10 @@ export default function Home() {
               </div>
             </div>
 
+            <p className="text-sm md:text-base text-cyan-400/80 text-center mb-2">
+              ※ 許可後、<span className="font-bold">3→2→1</span> のカウントダウンで録音開始します
+            </p>
+
             <button
               onClick={requestMicPermissionAndProceed}
               className="w-full max-w-sm mx-auto py-4 md:py-5 bg-gradient-to-r from-cyan-600 to-blue-600 rounded-xl md:rounded-2xl font-bold text-lg md:text-xl hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-cyan-900/30"
