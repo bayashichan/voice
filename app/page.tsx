@@ -298,10 +298,11 @@ export default function Home() {
           <div className="text-blue-400 text-sm md:text-base mb-4 tracking-widest">STEP 2 / 3</div>
           <h2 className="text-2xl md:text-4xl lg:text-5xl font-bold text-white mb-6 md:mb-10 leading-tight">
             <span className="text-purple-400">フルネーム</span>を<br />
-            繰り返してください
+            自然なペースで<br />
+            繰り返し言ってください
           </h2>
           <p className="text-base md:text-xl text-gray-400 mb-8 md:mb-12">
-            約10秒間、自然なペースで
+            早口や、ゆっくり言う必要はありません
           </p>
           <ConfirmButton onClick={nextStep} />
         </FullScreenWrapper>
