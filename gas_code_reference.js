@@ -6,9 +6,11 @@ function doPost(e) {
         var data = JSON.parse(e.postData.contents);
         var base64 = data.fileData;
         var mimeType = data.mimeType || "audio/wav";
+        var userName = data.userName || "unknown";
 
-        // 現在日時をファイル名にする
-        var fileName = "voice_record_" + Utilities.formatDate(new Date(), "JST", "yyyyMMdd_HHmmss") + ".wav";
+        // ユーザー名と日時をファイル名にする
+        var sanitizedName = userName.replace(/[\\/:*?"<>|]/g, "_"); // ファイル名に使えない文字を置換
+        var fileName = sanitizedName + "_" + Utilities.formatDate(new Date(), "JST", "yyyyMMdd_HHmmss") + ".wav";
 
         // Base64デコード
         var decoded = Utilities.base64Decode(base64);

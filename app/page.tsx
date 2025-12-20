@@ -8,7 +8,7 @@ import { AudioVisualizer } from "@/components/AudioVisualizer";
 import { blobToBase64 } from "@/utils/fileHelpers";
 import { cn } from "@/utils/cn";
 
-type AppState = "intro" | "privacy" | "step1" | "step2" | "step3" | "micTest" | "countdown" | "recording" | "uploading" | "completed" | "error";
+type AppState = "intro" | "privacy" | "step1" | "step2" | "step3" | "nameInput" | "micTest" | "countdown" | "recording" | "uploading" | "completed" | "error";
 type DeviceType = "ios" | "android" | "pc";
 
 export default function Home() {
@@ -20,6 +20,7 @@ export default function Home() {
   const [micLevel, setMicLevel] = useState<number>(0);
   const micTestRecorderRef = useRef<AudioRecorder | null>(null);
   const [deviceType, setDeviceType] = useState<DeviceType>("pc");
+  const [userName, setUserName] = useState<string>("");
 
   // デバイス判定
   useEffect(() => {
@@ -39,7 +40,14 @@ export default function Home() {
     else if (appState === "privacy") setAppState("step1");
     else if (appState === "step1") setAppState("step2");
     else if (appState === "step2") setAppState("step3");
-    else if (appState === "step3") setAppState("micTest");
+    else if (appState === "step3") setAppState("nameInput");
+  };
+
+  // 名前入力後、マイクテストへ
+  const proceedToMicTest = () => {
+    if (userName.trim().length > 0) {
+      setAppState("micTest");
+    }
   };
 
   // マイク許可を取得して録音へ進む（シンプル版）
@@ -95,7 +103,7 @@ export default function Home() {
       const response = await fetch("/api/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileData: base64, mimeType: "audio/wav" }),
+        body: JSON.stringify({ fileData: base64, mimeType: "audio/wav", userName: userName }),
       });
 
       if (!response.ok) throw new Error("Server error");
@@ -120,6 +128,13 @@ export default function Home() {
     setAnalyser(null);
     setMicTestAnalyser(null);
     setMicLevel(0);
+    setUserName("");
+  };
+
+  // 録音だけやり直し（名前はそのまま）
+  const retryRecording = () => {
+    setAppState("micTest");
+    setAnalyser(null);
   };
 
   // デバイス別マイク許可ガイド
@@ -300,6 +315,43 @@ export default function Home() {
         </FullScreenWrapper>
       )}
 
+      {/* State: NAME INPUT - 名前入力 */}
+      {appState === "nameInput" && (
+        <FullScreenWrapper>
+          <h2 className="text-2xl md:text-4xl font-bold text-white mb-6 md:mb-8">
+            お名前を入力してください
+          </h2>
+          <p className="text-sm md:text-base text-gray-400 mb-6">
+            録音データの識別に使用します
+          </p>
+
+          <div className="w-full max-w-sm space-y-6">
+            <input
+              type="text"
+              value={userName}
+              onChange={(e) => setUserName(e.target.value)}
+              placeholder="例：山田太郎"
+              className="w-full px-4 py-4 bg-gray-900/80 border border-gray-700 rounded-xl text-white text-lg md:text-xl text-center placeholder-gray-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500"
+              autoFocus
+            />
+
+            <button
+              onClick={proceedToMicTest}
+              disabled={userName.trim().length === 0}
+              className={cn(
+                "w-full py-4 md:py-5 rounded-xl md:rounded-2xl font-bold text-lg md:text-xl transition-all flex items-center justify-center gap-2 shadow-lg",
+                userName.trim().length > 0
+                  ? "bg-gradient-to-r from-blue-600 to-indigo-600 hover:opacity-90 shadow-blue-900/30"
+                  : "bg-gray-700 text-gray-400 cursor-not-allowed"
+              )}
+            >
+              次へ
+              <ArrowRight className="w-5 h-5 md:w-6 md:h-6" />
+            </button>
+          </div>
+        </FullScreenWrapper>
+      )}
+
       {/* State: MIC TEST - シンプル版 */}
       {appState === "micTest" && (
         <FullScreenWrapper>
@@ -411,17 +463,29 @@ export default function Home() {
             <CheckCircle2 className="w-20 h-20 md:w-24 md:h-24 text-green-500 animate-bounce" />
             <div className="text-center">
               <h2 className="text-2xl md:text-3xl font-bold text-green-400 mb-3">保存完了</h2>
-              <p className="text-gray-300 text-base md:text-lg">声紋データの送信が完了しました。<br />ご協力ありがとうございました。</p>
+              <p className="text-gray-300 text-base md:text-lg">
+                {userName}さんの声紋データを保存しました。<br />
+                ご協力ありがとうございました。
+              </p>
             </div>
             <p className="text-xs md:text-sm text-gray-500 text-center">
               ※ 音声データは分析完了後、速やかに削除いたします
             </p>
-            <button
-              onClick={resetApp}
-              className="px-6 py-3 bg-gray-800 rounded-full text-sm md:text-base font-medium hover:bg-gray-700 transition-colors"
-            >
-              最初の画面に戻る
-            </button>
+
+            <div className="w-full max-w-sm space-y-3">
+              <button
+                onClick={retryRecording}
+                className="w-full py-3 bg-orange-600 rounded-xl font-bold text-base hover:bg-orange-700 transition-colors"
+              >
+                もう一度録音し直す
+              </button>
+
+              <p className="text-xs md:text-sm text-gray-400 text-center">
+                録音し直す必要がない場合は<br />
+                このままブラウザを閉じてください
+              </p>
+            </div>
+
             <div className="text-xs text-gray-600 mt-4">
               © 声紋分析コーチ若林
             </div>
