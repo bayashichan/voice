@@ -1,7 +1,13 @@
-function doPost(e) {
-    // CORS対応 (OPTIONSリクエストへの対応が必要な場合があるが、Next.js Proxy経由なら基本不要)
-    // ただし、もし直接叩く場合のためにヘッダーをつけておくのは親切
+// Google Apps Script - 声紋録音データ保存用
+// このコードをGASエディタに貼り付けてデプロイしてください
 
+function doGet(e) {
+    // OPTIONSリクエストの代わりにGETでCORSプリフライトに対応
+    return ContentService.createTextOutput(JSON.stringify({ status: "ok" }))
+        .setMimeType(ContentService.MimeType.JSON);
+}
+
+function doPost(e) {
     try {
         var data = JSON.parse(e.postData.contents);
         var base64 = data.fileData;
