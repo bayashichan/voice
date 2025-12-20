@@ -429,7 +429,7 @@ export default function Home() {
       <div className="z-10 w-full max-w-md flex flex-col items-center space-y-6 md:space-y-8">
 
         {/* Header (メイン画面用) */}
-        {!["intro", "step1", "step2", "step3", "micTest"].includes(appState) && (
+        {!["intro", "privacy", "step1", "step2", "step3", "micTest"].includes(appState) && (
           <h1 className="text-2xl md:text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400">
             声紋分析レコーダー
           </h1>
