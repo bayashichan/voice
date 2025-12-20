@@ -503,6 +503,7 @@ export default function Home() {
             <Loader2 className="w-16 h-16 md:w-20 md:h-20 text-blue-500 animate-spin" />
             <p className="text-lg md:text-2xl font-medium">Googleドライブへ保存中...</p>
             <p className="text-sm md:text-base text-gray-500">この処理には数秒かかる場合があります</p>
+            <p className="text-xs text-red-400 animate-pulse">⚠️ 完了するまでブラウザを閉じないでください</p>
           </div>
         )}
 
