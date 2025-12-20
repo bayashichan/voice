@@ -107,18 +107,30 @@ export default function Home() {
       step = "データ変換";
       const base64 = await blobToBase64(result.blob);
 
-      // Step 3: アップロード
+      // Step 3: アップロード (iOS互換のためXMLHttpRequestを使用)
       step = "サーバー送信";
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30秒タイムアウト
+      const uploadData = JSON.stringify({ fileData: base64, mimeType: "audio/wav", userName: userName });
 
-      const response = await fetch("/api/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileData: base64, mimeType: "audio/wav", userName: userName }),
-        signal: controller.signal,
+      const response = await new Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/upload", true);
+        xhr.setRequestHeader("Content-Type", "application/json");
+        xhr.timeout = 60000; // 60秒タイムアウト（iOSでは長めに）
+
+        xhr.onload = () => {
+          resolve({
+            ok: xhr.status >= 200 && xhr.status < 300,
+            status: xhr.status,
+            json: () => Promise.resolve(JSON.parse(xhr.responseText))
+          });
+        };
+
+        xhr.onerror = () => reject(new Error("ネットワークエラー"));
+        xhr.ontimeout = () => reject(new Error("タイムアウト"));
+        xhr.onabort = () => reject(new Error("中断されました"));
+
+        xhr.send(uploadData);
       });
-      clearTimeout(timeoutId);
 
       if (!response.ok) {
         throw new Error(`サーバーエラー (${response.status})`);
@@ -126,7 +138,7 @@ export default function Home() {
 
       // Step 4: レスポンス確認
       step = "保存確認";
-      const data = await response.json();
+      const data = await response.json() as { result?: string; message?: string };
       if (data.result === "success") {
         setAppState("completed");
       } else {
