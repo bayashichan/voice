@@ -4,83 +4,107 @@ export interface AudioRecorderResult {
 }
 
 export class AudioRecorder {
-  private mediaRecorder: MediaRecorder | null = null;
-  private mediaStream: MediaStream | null = null;
   private audioContext: AudioContext | null = null;
+  private mediaStream: MediaStream | null = null;
+  private processor: ScriptProcessorNode | null = null;
+  private source: MediaStreamAudioSourceNode | null = null;
+  private leftChannelData: Float32Array[] = [];
+  private recordingLength = 0;
+  private sampleRate = 44100;
   private analyser: AnalyserNode | null = null;
-  private chunks: Blob[] = [];
-  private startTime = 0;
 
   async start(): Promise<AnalyserNode> {
-    this.chunks = [];
-    this.startTime = Date.now();
+    this.leftChannelData = [];
+    this.recordingLength = 0;
 
-    // マイク許可を取得
     this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-    // ビジュアライザー用のAnalyserNode
+    // iOS対応: サンプルレートを指定せずにAudioContextを作成
     this.audioContext = new AudioContext();
-    const source = this.audioContext.createMediaStreamSource(this.mediaStream);
+    this.sampleRate = this.audioContext.sampleRate;
+
+    this.source = this.audioContext.createMediaStreamSource(this.mediaStream);
+
+    // アナライザーの設定（ビジュアライザー用）
     this.analyser = this.audioContext.createAnalyser();
     this.analyser.fftSize = 2048;
-    source.connect(this.analyser);
+    this.source.connect(this.analyser);
 
-    // MediaRecorderで録音（iOSではwebmが使えないのでmp4やm4aを試す）
-    let mimeType = 'audio/webm';
-    if (typeof MediaRecorder !== 'undefined') {
-      if (MediaRecorder.isTypeSupported('audio/webm')) {
-        mimeType = 'audio/webm';
-      } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-        mimeType = 'audio/mp4';
-      } else if (MediaRecorder.isTypeSupported('audio/aac')) {
-        mimeType = 'audio/aac';
-      } else if (MediaRecorder.isTypeSupported('audio/ogg')) {
-        mimeType = 'audio/ogg';
-      } else {
-        // デフォルト（iOSの場合は何も指定しない方が良い場合がある）
-        mimeType = '';
-      }
-    }
+    // 録音処理用のノード
+    this.processor = this.audioContext.createScriptProcessor(4096, 1, 1);
 
-    const options = mimeType ? { mimeType } : undefined;
-    this.mediaRecorder = new MediaRecorder(this.mediaStream, options);
-
-    this.mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) {
-        this.chunks.push(e.data);
-      }
+    this.processor.onaudioprocess = (e) => {
+      const left = e.inputBuffer.getChannelData(0);
+      this.leftChannelData.push(new Float32Array(left));
+      this.recordingLength += left.length;
     };
 
-    this.mediaRecorder.start();
+    this.source.connect(this.processor);
+    this.processor.connect(this.audioContext.destination);
 
     return this.analyser;
   }
 
   async stop(): Promise<AudioRecorderResult> {
-    return new Promise((resolve, reject) => {
-      if (!this.mediaRecorder) {
-        reject(new Error('MediaRecorder not initialized'));
-        return;
-      }
+    if (this.audioContext && this.audioContext.state !== 'closed') {
+      this.audioContext.close();
+    }
+    this.mediaStream?.getTracks().forEach((track) => track.stop());
+    this.processor?.disconnect();
+    this.source?.disconnect();
 
-      this.mediaRecorder.onstop = () => {
-        const duration = (Date.now() - this.startTime) / 1000;
-        const blob = new Blob(this.chunks, { type: this.mediaRecorder?.mimeType || 'audio/webm' });
+    const buffer = this.mergeBuffers(this.leftChannelData, this.recordingLength);
+    const wavBlob = this.encodeWAV(buffer);
 
-        // クリーンアップ
-        this.mediaStream?.getTracks().forEach((track) => track.stop());
-        if (this.audioContext && this.audioContext.state !== 'closed') {
-          this.audioContext.close();
-        }
+    return {
+      blob: wavBlob,
+      duration: this.recordingLength / this.sampleRate,
+    };
+  }
 
-        resolve({ blob, duration });
-      };
+  private mergeBuffers(channelBuffer: Float32Array[], recordingLength: number): Float32Array {
+    const result = new Float32Array(recordingLength);
+    let offset = 0;
+    for (const buffer of channelBuffer) {
+      result.set(buffer, offset);
+      offset += buffer.length;
+    }
+    return result;
+  }
 
-      this.mediaRecorder.onerror = (e) => {
-        reject(new Error('録音エラー: ' + e));
-      };
+  private encodeWAV(samples: Float32Array): Blob {
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
 
-      this.mediaRecorder.stop();
-    });
+    this.writeString(view, 0, 'RIFF');
+    view.setUint32(4, 36 + samples.length * 2, true);
+    this.writeString(view, 8, 'WAVE');
+    this.writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, this.sampleRate, true);
+    view.setUint32(28, this.sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    this.writeString(view, 36, 'data');
+    view.setUint32(40, samples.length * 2, true);
+
+    this.floatTo16BitPCM(view, 44, samples);
+
+    return new Blob([view], { type: 'audio/wav' });
+  }
+
+  private floatTo16BitPCM(output: DataView, offset: number, input: Float32Array) {
+    for (let i = 0; i < input.length; i++, offset += 2) {
+      const s = Math.max(-1, Math.min(1, input[i]));
+      output.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    }
+  }
+
+  private writeString(view: DataView, offset: number, string: string) {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
+    }
   }
 }

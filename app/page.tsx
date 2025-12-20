@@ -572,7 +572,7 @@ export default function Home() {
                 </p>
                 <a
                   href={URL.createObjectURL(recordedBlob)}
-                  download={`${userName || 'voice'}_${new Date().toISOString().slice(0, 10)}.webm`}
+                  download={`${userName || 'voice'}_${new Date().toISOString().slice(0, 10)}.wav`}
                   className="block w-full py-3 bg-blue-600 rounded-xl font-bold text-center text-lg hover:bg-blue-700 transition-colors"
                 >
                   録音をダウンロード
