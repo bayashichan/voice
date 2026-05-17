@@ -7,6 +7,7 @@ import { GlowCountdown } from "@/components/GlowCountdown";
 import { AudioVisualizer } from "@/components/AudioVisualizer";
 import { blobToBase64 } from "@/utils/fileHelpers";
 import { cn } from "@/utils/cn";
+import { GAS_WEB_APP_URL } from "@/utils/config";
 
 type AppState = "intro" | "privacy" | "step1" | "step2" | "step3" | "nameInput" | "micTest" | "countdown" | "recording" | "uploading" | "completed" | "iosDownload" | "error";
 type DeviceType = "ios" | "android" | "pc";
@@ -104,11 +105,11 @@ export default function Home() {
       step = "録音停止";
       const result: AudioRecorderResult = await recorderRef.current.stop();
 
-      // 録音データを保存（ダウンロード用）
+      // 録音データを保存（ダウンロード用フォールバック）
       setRecordedBlob(result.blob);
 
-      // iOSの場合はアップロードせずダウンロード画面へ
-      if (deviceType === "ios") {
+      // GAS URLが未設定の場合はダウンロード画面へ
+      if (!GAS_WEB_APP_URL) {
         setAppState("iosDownload");
         return;
       }
@@ -117,47 +118,30 @@ export default function Home() {
       step = "データ変換";
       const base64 = await blobToBase64(result.blob);
 
-      // Step 3: アップロード (iOS互換のためXMLHttpRequestを使用)
+      // Step 3: GASに送信
+      // GASはCORSヘッダーを返せないため、mode:'no-cors' + Content-Type:'text/plain' を使う
+      // （シンプルリクエスト扱いになりプリフライトが不要）
+      // no-corsではレスポンスは読めないが、GASはデータを受信して保存する
       step = "サーバー送信";
-      const uploadData = JSON.stringify({ fileData: base64, mimeType: "audio/wav", userName: userName });
-
-      const response = await new Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open("POST", "/api/upload", true);
-        xhr.setRequestHeader("Content-Type", "application/json");
-        xhr.timeout = 60000; // 60秒タイムアウト（iOSでは長めに）
-
-        xhr.onload = () => {
-          resolve({
-            ok: xhr.status >= 200 && xhr.status < 300,
-            status: xhr.status,
-            json: () => Promise.resolve(JSON.parse(xhr.responseText))
-          });
-        };
-
-        xhr.onerror = () => reject(new Error("ネットワークエラー"));
-        xhr.ontimeout = () => reject(new Error("タイムアウト"));
-        xhr.onabort = () => reject(new Error("中断されました"));
-
-        xhr.send(uploadData);
+      await fetch(GAS_WEB_APP_URL, {
+        method: "POST",
+        mode: "no-cors",
+        headers: {
+          "Content-Type": "text/plain", // シンプルリクエストにするためtext/plain
+        },
+        body: JSON.stringify({
+          fileData: base64,
+          mimeType: "audio/wav",
+          userName: userName,
+        }),
       });
 
-      if (!response.ok) {
-        throw new Error(`サーバーエラー (${response.status})`);
-      }
-
-      // Step 4: レスポンス確認
-      step = "保存確認";
-      const data = await response.json() as { result?: string; message?: string };
-      if (data.result === "success") {
-        setAppState("completed");
-      } else {
-        throw new Error(data.message || "保存確認に失敗");
-      }
+      // no-corsではレスポンスを検証できないため、送信完了をもって成功とみなす
+      setAppState("completed");
 
     } catch (e: unknown) {
       console.error(`エラー発生場所: ${step}`, e);
-      // エラーの場合はダウンロード画面を表示（エラーメッセージは表示しない）
+      // ネットワークエラー等の場合はダウンロード画面を表示
       setAppState("iosDownload");
     }
   };
@@ -255,17 +239,17 @@ export default function Home() {
       {appState === "intro" && (
         <FullScreenWrapper>
           <h1 className="text-3xl md:text-5xl lg:text-6xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 via-purple-400 to-blue-400 mb-6 md:mb-10">
-            声紋分析レコーダー
+            声紋診断レコーダー
           </h1>
           <p className="text-lg md:text-2xl text-gray-300 mb-8 md:mb-12 leading-relaxed">
-            声紋分析のための<br />
+            声紋診断のための<br />
             <span className="text-white font-medium">高品質な音声録音</span>を行います
           </p>
           <ConfirmButton onClick={nextStep} text="はじめる" />
 
           {/* フッター */}
           <div className="absolute bottom-4 md:bottom-6 left-0 right-0 text-center text-xs md:text-sm text-gray-600">
-            © 声紋分析コーチ若林
+            © 声紋診断アップデート林
           </div>
         </FullScreenWrapper>
       )}
@@ -283,7 +267,7 @@ export default function Home() {
             <div className="flex items-start gap-3">
               <CheckCircle2 className="w-5 h-5 text-green-400 mt-0.5 flex-shrink-0" />
               <p className="text-sm md:text-base text-gray-300">
-                録音した音声データは<span className="text-white font-medium">声紋分析のためだけ</span>に使用します
+                録音した音声データは<span className="text-white font-medium">声紋診断のためだけ</span>に使用します
               </p>
             </div>
             <div className="flex items-start gap-3">
@@ -302,7 +286,7 @@ export default function Home() {
           <ConfirmButton onClick={nextStep} text="同意して続ける" />
 
           <div className="absolute bottom-4 md:bottom-6 left-0 right-0 text-center text-xs md:text-sm text-gray-600">
-            © 声紋分析コーチ若林
+            © 声紋診断アップデート林
           </div>
         </FullScreenWrapper>
       )}
@@ -315,9 +299,16 @@ export default function Home() {
             静かで落ち着いた<br />
             <span className="text-cyan-400">環境</span>で行ってください
           </h2>
-          <p className="text-base md:text-xl text-gray-400 mb-8 md:mb-12">
+          <p className="text-base md:text-xl text-gray-400 mb-4">
             反響の少ない部屋が理想的です
           </p>
+          <div className="bg-yellow-900/30 border border-yellow-700/50 rounded-xl p-4 mb-8 md:mb-12">
+            <p className="text-sm md:text-base text-yellow-300">
+              ⚠️ <span className="font-medium">Bluetoothイヤホンマイクは使用せず</span>、<br />
+              スマホ本体のマイクで直接録音してください。<br />
+              <span className="text-yellow-400/80 text-xs">（分析精度に影響します）</span>
+            </p>
+          </div>
           <ConfirmButton onClick={nextStep} />
         </FullScreenWrapper>
       )}
@@ -469,7 +460,7 @@ export default function Home() {
         {/* Header (メイン画面用) */}
         {!["intro", "privacy", "step1", "step2", "step3", "micTest"].includes(appState) && (
           <h1 className="text-2xl md:text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400">
-            声紋分析レコーダー
+            声紋診断レコーダー
           </h1>
         )}
 
@@ -501,7 +492,7 @@ export default function Home() {
         {appState === "uploading" && (
           <div className="flex flex-col items-center space-y-4 md:space-y-6">
             <Loader2 className="w-16 h-16 md:w-20 md:h-20 text-blue-500 animate-spin" />
-            <p className="text-lg md:text-2xl font-medium">Googleドライブへ保存中...</p>
+            <p className="text-lg md:text-2xl font-medium">保存中...</p>
             <p className="text-sm md:text-base text-gray-500">この処理には数秒かかる場合があります</p>
             <p className="text-xs text-red-400 animate-pulse">⚠️ 完了するまでブラウザを閉じないでください</p>
           </div>
@@ -514,7 +505,7 @@ export default function Home() {
             <div className="text-center">
               <h2 className="text-2xl md:text-3xl font-bold text-green-400 mb-3">保存完了</h2>
               <p className="text-gray-300 text-base md:text-lg">
-                {userName}さんの声紋データを保存しました。<br />
+                {userName}さんの声紋診断データを保存しました。<br />
                 ご協力ありがとうございました。
               </p>
             </div>
@@ -544,7 +535,7 @@ export default function Home() {
             </div>
 
             <div className="text-xs text-gray-600 mt-4">
-              © 声紋分析コーチ若林
+              © 声紋診断アップデート林
             </div>
           </div>
         )}
@@ -556,14 +547,14 @@ export default function Home() {
             <div className="text-center">
               <h2 className="text-2xl md:text-3xl font-bold text-blue-400 mb-3">録音完了！</h2>
               <p className="text-gray-300 text-base md:text-lg">
-                {userName}さんの声紋を録音しました
+                {userName}さんの声紋診断データを録音しました
               </p>
             </div>
 
             <div className="w-full max-w-sm bg-blue-900/30 border border-blue-700/50 rounded-xl p-4 text-center space-y-4">
               <p className="text-blue-300 font-medium text-base md:text-lg">
                 📱 下のボタンでダウンロードして<br />
-                LINEで若林に送信してください
+                公式LINEでアップデート林に送ってください
               </p>
               <a
                 href={URL.createObjectURL(recordedBlob)}
@@ -575,8 +566,8 @@ export default function Home() {
             </div>
 
             <p className="text-xs md:text-sm text-gray-400 text-center">
-              ダウンロード後、「ファイル」アプリから<br />
-              LINEで若林に共有してください
+              ダウンロードしたデータを公式LINEで<br />
+              アップデート林に送ってください
             </p>
 
             <div className="w-full max-w-sm pt-4 border-t border-gray-800">
@@ -592,7 +583,7 @@ export default function Home() {
             </div>
 
             <div className="text-xs text-gray-600 mt-4">
-              © 声紋分析コーチ若林
+              © 声紋診断アップデート林
             </div>
           </div>
         )}

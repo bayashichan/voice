@@ -1,0 +1,14 @@
+name = "voice-recorder-api"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+account_id = "bdd15eda0973e0e1b9bafb767938f48c"
+
+# R2バケットのバインディング
+[[r2_buckets]]
+binding = "RECORDINGS"
+bucket_name = "voice-recordings"
+
+# 環境変数（デプロイ後に設定）
+[vars]
+ADMIN_PASSWORD = "bayashi-voice-2026"
+GAS_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwDwK7mXEpYZvD5psFufrhlpdYPMPHyczz4ag2d2a0RzDuCNvJ-IdTsE8D4q-eQUGgAig/exec"
