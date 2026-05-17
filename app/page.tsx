@@ -108,12 +108,6 @@ export default function Home() {
       // 録音データを保存（ダウンロード用フォールバック）
       setRecordedBlob(result.blob);
 
-      // GAS URLが未設定の場合はダウンロード画面へ
-      if (!GAS_WEB_APP_URL) {
-        setAppState("iosDownload");
-        return;
-      }
-
       // Step 2: Base64エンコード
       step = "データ変換";
       const base64 = await blobToBase64(result.blob);
