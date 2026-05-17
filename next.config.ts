@@ -6,7 +6,7 @@ const nextConfig: NextConfig = {
     return [
       {
         source: '/api/upload',
-        destination: process.env.GAS_WEB_APP_URL || 'https://script.google.com/macros/s/AKfycbz_XXXXXXXX/exec', // ユーザーへのプレースホルダー
+        destination: 'https://voice-recorder-api.wakaossan2001.workers.dev/upload',
       },
     ];
   },

@@ -110,10 +110,34 @@ function doGet(e) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-// POSTリクエスト: 録音ファイルを保存する
+// POSTリクエスト: 録音ファイルを保存 or Workersからの通知メール送信
 function doPost(e) {
   try {
     var data = JSON.parse(e.postData.contents);
+
+    // Cloudflare Workersからのメール通知モード（fileDataなし）
+    if (data.type === "notification") {
+      try {
+        var subject = "【声紋録音】" + data.userName + "さんの録音が届きました";
+        var body = [
+          "声紋録音データが保存されました。",
+          "",
+          "■ お名前: " + data.userName,
+          "■ ファイル名: " + data.fileName,
+          "■ 録音日時: " + data.uploadedAt,
+          "",
+          "---",
+          "声紋分析レコーダー 自動通知"
+        ].join("\n");
+        MailApp.sendEmail(NOTIFY_EMAIL, subject, body);
+      } catch (mailError) {
+        console.log("メール送信エラー: " + mailError.toString());
+      }
+      return ContentService
+        .createTextOutput(JSON.stringify({ result: "success", message: "通知メール送信完了" }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
     var base64 = data.fileData;
     var mimeType = data.mimeType || "audio/wav";
     var userName = data.userName || "unknown";
