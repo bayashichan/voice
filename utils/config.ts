@@ -20,7 +20,7 @@ export const ADMIN_PASSWORD = "bayashi-voice-2026";
 //
 // 例: https://script.google.com/macros/s/AKfycbz_XXXXXXXX.../exec
 
-export const GAS_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwDwK7mXEpYZvD5psFufrhlpdYPMPHyczz4ag2d2a0RzDuCNvJ-IdTsE8D4q-eQUGgAig/exec";
+export const GAS_WEB_APP_URL = "https://script.google.com/macros/s/AKfycby_DyLnvDHJkXJlKFTAzwjyf3_z0W8HRyg3Z8audZ8BhxA7wO2ajOJcyGlIUSgj6MU09g/exec";
 
 // 空の場合はローカルダウンロード機能のみが使えます
 // URLを設定すると、録音データがGoogleドライブに自動保存されます
