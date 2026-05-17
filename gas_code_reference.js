@@ -27,6 +27,18 @@ function doPost(e) {
         // var file = folder.createFile(blob);
         var file = DriveApp.createFile(blob);
 
+        // メール通知（GASオーナーのGmailへ）
+        var ownerEmail = Session.getActiveUser().getEmail();
+        MailApp.sendEmail(
+            ownerEmail,
+            '【録音通知】' + fileName,
+            '録音ファイルが保存されました。\n\n' +
+            'ファイル名: ' + fileName + '\n' +
+            'ユーザー: ' + userName + '\n' +
+            'Drive ID: ' + file.getId() + '\n' +
+            '保存日時: ' + Utilities.formatDate(new Date(), "JST", "yyyy/MM/dd HH:mm:ss")
+        );
+
         var response = {
             result: "success",
             fileId: file.getId(),

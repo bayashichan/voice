@@ -6,7 +6,7 @@ export interface AudioRecorderResult {
 export class AudioRecorder {
   private audioContext: AudioContext | null = null;
   private mediaStream: MediaStream | null = null;
-  private processor: ScriptProcessorNode | null = null;
+  private workletNode: AudioWorkletNode | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
   private leftChannelData: Float32Array[] = [];
   private recordingLength = 0;
@@ -17,41 +17,46 @@ export class AudioRecorder {
     this.leftChannelData = [];
     this.recordingLength = 0;
 
-    this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    this.mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        sampleRate: 44100,
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+    });
 
-    // iOS対応: サンプルレートを指定せずにAudioContextを作成
-    this.audioContext = new AudioContext();
+    this.audioContext = new AudioContext({ sampleRate: 44100 });
     this.sampleRate = this.audioContext.sampleRate;
+
+    await this.audioContext.audioWorklet.addModule('/audio-worklet-processor.js');
 
     this.source = this.audioContext.createMediaStreamSource(this.mediaStream);
 
-    // アナライザーの設定（ビジュアライザー用）
     this.analyser = this.audioContext.createAnalyser();
     this.analyser.fftSize = 2048;
     this.source.connect(this.analyser);
 
-    // 録音処理用のノード
-    this.processor = this.audioContext.createScriptProcessor(4096, 1, 1);
-
-    this.processor.onaudioprocess = (e) => {
-      const left = e.inputBuffer.getChannelData(0);
-      this.leftChannelData.push(new Float32Array(left));
-      this.recordingLength += left.length;
+    this.workletNode = new AudioWorkletNode(this.audioContext, 'recording-processor');
+    this.workletNode.port.onmessage = (e: MessageEvent<Float32Array>) => {
+      this.leftChannelData.push(e.data);
+      this.recordingLength += e.data.length;
     };
-
-    this.source.connect(this.processor);
-    this.processor.connect(this.audioContext.destination);
+    this.source.connect(this.workletNode);
 
     return this.analyser;
   }
 
   async stop(): Promise<AudioRecorderResult> {
-    if (this.audioContext && this.audioContext.state !== 'closed') {
-      this.audioContext.close();
-    }
-    this.mediaStream?.getTracks().forEach((track) => track.stop());
-    this.processor?.disconnect();
+    this.workletNode?.port.close();
+    this.workletNode?.disconnect();
+    this.analyser?.disconnect();
     this.source?.disconnect();
+    this.mediaStream?.getTracks().forEach((track) => track.stop());
+    if (this.audioContext && this.audioContext.state !== 'closed') {
+      await this.audioContext.close();
+    }
 
     const buffer = this.mergeBuffers(this.leftChannelData, this.recordingLength);
     const wavBlob = this.encodeWAV(buffer);
@@ -97,8 +102,8 @@ export class AudioRecorder {
 
   private floatTo16BitPCM(output: DataView, offset: number, input: Float32Array) {
     for (let i = 0; i < input.length; i++, offset += 2) {
-      const s = Math.max(-1, Math.min(1, input[i]));
-      output.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      const clamped = Math.max(-1, Math.min(1, input[i]));
+      output.setInt16(offset, Math.max(-32768, Math.min(32767, Math.round(clamped * 32768))), true);
     }
   }
 

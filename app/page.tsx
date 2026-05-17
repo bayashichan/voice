@@ -107,12 +107,6 @@ export default function Home() {
       // 録音データを保存（ダウンロード用）
       setRecordedBlob(result.blob);
 
-      // iOSの場合はアップロードせずダウンロード画面へ
-      if (deviceType === "ios") {
-        setAppState("iosDownload");
-        return;
-      }
-
       // Step 2: Base64エンコード
       step = "データ変換";
       const base64 = await blobToBase64(result.blob);
