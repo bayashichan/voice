@@ -7,7 +7,7 @@ import { GlowCountdown } from "@/components/GlowCountdown";
 import { AudioVisualizer } from "@/components/AudioVisualizer";
 import { blobToBase64 } from "@/utils/fileHelpers";
 import { cn } from "@/utils/cn";
-import { GAS_WEB_APP_URL } from "@/utils/config";
+import { WORKERS_API_URL } from "@/utils/config";
 
 type AppState = "intro" | "privacy" | "step1" | "step2" | "step3" | "nameInput" | "micTest" | "countdown" | "recording" | "uploading" | "completed" | "iosDownload" | "error";
 type DeviceType = "ios" | "android" | "pc";
@@ -118,17 +118,11 @@ export default function Home() {
       step = "データ変換";
       const base64 = await blobToBase64(result.blob);
 
-      // Step 3: GASに送信
-      // GASはCORSヘッダーを返せないため、mode:'no-cors' + Content-Type:'text/plain' を使う
-      // （シンプルリクエスト扱いになりプリフライトが不要）
-      // no-corsではレスポンスは読めないが、GASはデータを受信して保存する
+      // Step 3: Workers (Cloudflare R2) に送信
       step = "サーバー送信";
-      await fetch(GAS_WEB_APP_URL, {
+      const res = await fetch(`${WORKERS_API_URL}/upload`, {
         method: "POST",
-        mode: "no-cors",
-        headers: {
-          "Content-Type": "text/plain", // シンプルリクエストにするためtext/plain
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           fileData: base64,
           mimeType: "audio/wav",
@@ -136,7 +130,10 @@ export default function Home() {
         }),
       });
 
-      // no-corsではレスポンスを検証できないため、送信完了をもって成功とみなす
+      if (!res.ok) throw new Error(`upload failed: ${res.status}`);
+      const json = await res.json() as { result: string };
+      if (json.result !== "success") throw new Error("upload result error");
+
       setAppState("completed");
 
     } catch (e: unknown) {
