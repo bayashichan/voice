@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { cn } from "@/utils/cn";
 
 interface GlowCountdownProps {
@@ -10,10 +10,15 @@ interface GlowCountdownProps {
 
 export function GlowCountdown({ onComplete, duration = 3 }: GlowCountdownProps) {
     const [count, setCount] = useState(duration);
+    // onComplete の参照が変わっても録音を二重に開始しないようにする
+    const firedRef = useRef(false);
 
     useEffect(() => {
         if (count <= 0) {
-            onComplete();
+            if (!firedRef.current) {
+                firedRef.current = true;
+                onComplete();
+            }
             return;
         }
 

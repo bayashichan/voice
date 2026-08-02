@@ -1,15 +1,10 @@
 import type { NextConfig } from "next";
 
+// 静的エクスポート（Cloudflare Pages へ out/ をそのまま配信）。
+// output: 'export' では rewrites() が無視されるため、
+// アップロード先の Workers URL は utils/config.ts から直接呼んでいる。
 const nextConfig: NextConfig = {
   output: 'export',
-  async rewrites() {
-    return [
-      {
-        source: '/api/upload',
-        destination: 'https://voice-recorder-api.wakaossan2001.workers.dev/upload',
-      },
-    ];
-  },
 };
 
 export default nextConfig;
