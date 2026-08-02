@@ -1,43 +1,186 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import { Mic, CheckCircle2, AlertCircle, Loader2, Volume2, ArrowRight, Smartphone, Monitor, Settings, Shield } from "lucide-react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import {
+  Mic,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
+  ArrowRight,
+  Smartphone,
+  Monitor,
+  Settings,
+  Shield,
+  ExternalLink,
+  Copy,
+  Check,
+  Share2,
+  Download,
+  RefreshCw,
+} from "lucide-react";
 import { AudioRecorder, AudioRecorderResult } from "@/utils/audioRecorder";
 import { GlowCountdown } from "@/components/GlowCountdown";
 import { AudioVisualizer } from "@/components/AudioVisualizer";
-import { blobToBase64 } from "@/utils/fileHelpers";
+import { uploadRecording, reportFailure } from "@/utils/uploadRecording";
 import { cn } from "@/utils/cn";
-import { WORKERS_API_URL } from "@/utils/config";
+import {
+  RECORDING_DURATION_SEC,
+  RECORDING_HARD_TIMEOUT_MS,
+  MIN_ACCEPTABLE_DURATION_SEC,
+  SILENCE_PEAK_THRESHOLD,
+} from "@/utils/config";
+import {
+  detectEnvironment,
+  getExternalBrowserGuide,
+  type EnvironmentInfo,
+} from "@/utils/environment";
+import { describeMicError, type MicErrorInfo } from "@/utils/micErrors";
 
-type AppState = "intro" | "privacy" | "step1" | "step2" | "step3" | "nameInput" | "micTest" | "countdown" | "recording" | "uploading" | "completed" | "iosDownload" | "error";
-type DeviceType = "ios" | "android" | "pc";
+type AppState =
+  | "intro"
+  | "privacy"
+  | "step1"
+  | "step2"
+  | "step3"
+  | "nameInput"
+  | "micTest"
+  | "micReady"
+  | "countdown"
+  | "recording"
+  | "uploading"
+  | "completed"
+  | "uploadFailed"
+  | "error";
+
+function errorNameOf(e: unknown): string {
+  if (e instanceof Error && e.name) return e.name;
+  return "UnknownError";
+}
+
+function newUploadId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 export default function Home() {
   const [appState, setAppState] = useState<AppState>("intro");
-  const [errorMsg, setErrorMsg] = useState<string>("");
-  const recorderRef = useRef<AudioRecorder | null>(null);
-  const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
-  const [micTestAnalyser, setMicTestAnalyser] = useState<AnalyserNode | null>(null);
-  const [micLevel, setMicLevel] = useState<number>(0);
-  const micTestRecorderRef = useRef<AudioRecorder | null>(null);
-  const [deviceType, setDeviceType] = useState<DeviceType>("pc");
+  const [env, setEnv] = useState<EnvironmentInfo | null>(null);
+  const [failure, setFailure] = useState<MicErrorInfo | null>(null);
   const [userName, setUserName] = useState<string>("");
-  const isComposingRef = useRef<boolean>(false);
-  const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
 
-  // デバイス判定
+  const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
+  const [micLevel, setMicLevel] = useState<number>(0);
+
+  const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
+  const [recordedDuration, setRecordedDuration] = useState<number>(0);
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
+  const [retryNotice, setRetryNotice] = useState<string>("");
+  const [copied, setCopied] = useState<boolean>(false);
+
+  const recorderRef = useRef<AudioRecorder | null>(null);
+  const stoppingRef = useRef<boolean>(false);
+  const hardTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+  const uploadIdRef = useRef<string>("");
+
+  // デバイス・ブラウザ判定
   useEffect(() => {
-    const ua = navigator.userAgent.toLowerCase();
-    if (/iphone|ipad|ipod/.test(ua)) {
-      setDeviceType("ios");
-    } else if (/android/.test(ua)) {
-      setDeviceType("android");
-    } else {
-      setDeviceType("pc");
+    setEnv(detectEnvironment());
+  }, []);
+
+  const device = env?.device ?? "pc";
+
+  // ---------------------------------------------------------------- リソース管理
+
+  const releaseWakeLock = useCallback(() => {
+    const lock = wakeLockRef.current;
+    wakeLockRef.current = null;
+    if (lock) void lock.release().catch(() => undefined);
+  }, []);
+
+  const requestWakeLock = useCallback(async () => {
+    // 録音中に画面が消えるとAudioContextが止まるため、可能な端末では抑止する
+    try {
+      if (typeof navigator !== "undefined" && navigator.wakeLock) {
+        wakeLockRef.current = await navigator.wakeLock.request("screen");
+      }
+    } catch {
+      // 非対応・拒否された場合は何もしない
     }
   }, []);
 
-  // ステップ進行
+  const disposeRecorder = useCallback(() => {
+    const recorder = recorderRef.current;
+    recorderRef.current = null;
+    setAnalyser(null);
+    setMicLevel(0);
+    if (recorder) void recorder.dispose().catch(() => undefined);
+  }, []);
+
+  const clearHardTimeout = useCallback(() => {
+    if (hardTimeoutRef.current) {
+      clearTimeout(hardTimeoutRef.current);
+      hardTimeoutRef.current = null;
+    }
+  }, []);
+
+  // アンマウント時に必ずマイクと画面ロックを解放する
+  useEffect(() => {
+    return () => {
+      clearHardTimeout();
+      releaseWakeLock();
+      const recorder = recorderRef.current;
+      recorderRef.current = null;
+      if (recorder) void recorder.dispose().catch(() => undefined);
+    };
+  }, [clearHardTimeout, releaseWakeLock]);
+
+  // ---------------------------------------------------------------- 失敗ハンドリング
+
+  const fail = useCallback(
+    (info: MicErrorInfo, stage: string, detail?: string) => {
+      clearHardTimeout();
+      releaseWakeLock();
+      disposeRecorder();
+      setFailure(info);
+      setAppState("error");
+      reportFailure({ stage, errorName: info.code, userName, detail });
+    },
+    [clearHardTimeout, releaseWakeLock, disposeRecorder, userName]
+  );
+
+  const failFromException = useCallback(
+    (e: unknown, stage: string) => {
+      const info = describeMicError(e, device);
+      const inApp = env?.inAppBrowser ?? null;
+
+      // アプリ内ブラウザでの拒否は設定を直しても解決しないので外部ブラウザへ誘導する
+      if (inApp && (info.code === "NotAllowedError" || info.code === "Unsupported")) {
+        const guide = getExternalBrowserGuide(inApp, device);
+        fail(
+          {
+            code: info.code,
+            title: guide.title,
+            message:
+              "アプリ内ブラウザではマイクを使用できません。下の手順で Safari または Chrome で開き直してください。",
+            hints: guide.steps,
+            action: "externalBrowser",
+          },
+          stage,
+          `inAppBrowser=${inApp}`
+        );
+        return;
+      }
+
+      fail(info, stage, e instanceof Error ? e.message : undefined);
+    },
+    [device, env, fail]
+  );
+
+  // ---------------------------------------------------------------- 画面遷移
+
   const nextStep = () => {
     if (appState === "intro") setAppState("privacy");
     else if (appState === "privacy") setAppState("step1");
@@ -46,152 +189,390 @@ export default function Home() {
     else if (appState === "step3") setAppState("nameInput");
   };
 
-  // 名前入力後、マイクテストへ
   const proceedToMicTest = () => {
     if (userName.trim().length > 0) {
       setAppState("micTest");
     }
   };
 
-  // マイク許可を取得して録音へ進む（シンプル版）
+  /**
+   * マイクを取得してオーディオグラフを組み立てる。
+   * iOS Safari は AudioContext の生成・resume がユーザー操作の中で始まる必要があるため、
+   * このハンドラから prepare() を呼ぶことが必須。ここで取得したマイクは
+   * カウントダウン中も開いたままにし、録音開始時に取り直さない。
+   */
   const requestMicPermissionAndProceed = async () => {
-    try {
-      // マイク許可だけを取得
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      // 許可が取れたらすぐにストリームを停止
-      stream.getTracks().forEach(track => track.stop());
+    disposeRecorder();
+    const recorder = new AudioRecorder();
+    recorderRef.current = recorder;
 
-      // 許可が取れたのでカウントダウンへ
-      recorderRef.current = new AudioRecorder();
-      setAppState("countdown");
+    try {
+      const prepared = await recorder.prepare();
+      setAnalyser(prepared.analyser);
+      setAppState("micReady");
+      void requestWakeLock();
     } catch (e) {
-      console.error(e);
-      setErrorMsg("マイクへのアクセスが許可されていません。ブラウザの設定を確認してください。");
-      setAppState("error");
+      console.error("マイクの準備に失敗:", e);
+      failFromException(e, "マイク準備");
     }
   };
 
-  const startRecording = async () => {
-    if (!recorderRef.current) return;
-    try {
-      setAppState("recording");
-      const analyserNode = await recorderRef.current.start();
-      setAnalyser(analyserNode);
-    } catch (e) {
-      console.error("Recording failed:", e);
-      setErrorMsg("録音の開始に失敗しました。");
-      setAppState("error");
-    }
-  };
-
-  // 10秒タイマー
+  // マイクテスト中のレベルメーター
   useEffect(() => {
-    let timer: NodeJS.Timeout;
-    if (appState === "recording") {
-      timer = setTimeout(async () => {
-        await stopAndUpload();
-      }, 10000); // 10秒
-    }
-    return () => clearTimeout(timer);
+    if (appState !== "micReady") return;
+    let raf = 0;
+    let last = 0;
+
+    const tick = (now: number) => {
+      raf = requestAnimationFrame(tick);
+      if (now - last < 80) return;
+      last = now;
+      setMicLevel(recorderRef.current?.getInputLevel() ?? 0);
+    };
+
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
   }, [appState]);
 
-  const stopAndUpload = async () => {
-    if (!recorderRef.current) return;
-    setAppState("uploading");
+  // ---------------------------------------------------------------- 録音
 
-    let step = "録音処理";
-    try {
-      // Step 1: 録音停止
-      step = "録音停止";
-      const result: AudioRecorderResult = await recorderRef.current.stop();
+  const stopAndUpload = useCallback(async () => {
+    if (stoppingRef.current) return;
+    stoppingRef.current = true;
+    clearHardTimeout();
 
-      // 録音データを保存（ダウンロード用フォールバック）
-      setRecordedBlob(result.blob);
-
-      // Step 2: Base64エンコード
-      step = "データ変換";
-      const base64 = await blobToBase64(result.blob);
-
-      // Step 3: Workers (Cloudflare R2) に送信
-      step = "サーバー送信";
-      const res = await fetch(`${WORKERS_API_URL}/upload`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          fileData: base64,
-          mimeType: "audio/wav",
-          userName: userName,
-        }),
-      });
-
-      if (!res.ok) throw new Error(`upload failed: ${res.status}`);
-      const json = await res.json() as { result: string };
-      if (json.result !== "success") throw new Error("upload result error");
-
-      setAppState("completed");
-
-    } catch (e: unknown) {
-      console.error(`エラー発生場所: ${step}`, e);
-      // ネットワークエラー等の場合はダウンロード画面を表示
-      setAppState("iosDownload");
+    const recorder = recorderRef.current;
+    if (!recorder) {
+      stoppingRef.current = false;
+      return;
     }
+
+    setAppState("uploading");
+    setUploadProgress(0);
+    setRetryNotice("");
+
+    let result: AudioRecorderResult;
+    try {
+      result = await recorder.stop();
+    } catch (e) {
+      console.error("録音停止に失敗:", e);
+      recorderRef.current = null;
+      releaseWakeLock();
+      setAnalyser(null);
+      setFailure({
+        code: errorNameOf(e),
+        title: "録音データを取り出せませんでした",
+        message: "お手数ですが、もう一度録音をお願いします。",
+        hints: [],
+        action: "retry",
+      });
+      setAppState("error");
+      reportFailure({
+        stage: "録音停止",
+        errorName: errorNameOf(e),
+        userName,
+        detail: e instanceof Error ? e.message : undefined,
+      });
+      stoppingRef.current = false;
+      return;
+    }
+
+    recorderRef.current = null;
+    releaseWakeLock();
+    setAnalyser(null);
+    setRecordedBlob(result.blob);
+    setRecordedDuration(result.duration);
+
+    // --- ここから壊れた録音を弾くガード。以前は無音のWAVでも「保存完了」になっていた ---
+    if (result.sampleCount === 0) {
+      setFailure({
+        code: result.interrupted ? "Interrupted" : "NoAudioData",
+        title: "録音できませんでした",
+        message: result.interrupted
+          ? "録音中に画面の切り替えや着信があったため、音声を取得できませんでした。もう一度お試しください。"
+          : "マイクから音声を取得できませんでした。もう一度お試しください。",
+        hints: ["録音中は画面を切り替えず、そのままお待ちください"],
+        action: "retry",
+      });
+      setAppState("error");
+      reportFailure({ stage: "録音", errorName: "NoAudioData", userName });
+      stoppingRef.current = false;
+      return;
+    }
+
+    if (result.duration < MIN_ACCEPTABLE_DURATION_SEC) {
+      setFailure({
+        code: "TooShort",
+        title: "録音が途中で止まりました",
+        message: `${result.duration.toFixed(1)}秒しか録音できませんでした。録音中は画面を切り替えずにお待ちください。`,
+        hints: ["他のアプリに切り替えない", "画面を消灯させない"],
+        action: "retry",
+      });
+      setAppState("error");
+      reportFailure({
+        stage: "録音",
+        errorName: "TooShort",
+        userName,
+        detail: `duration=${result.duration.toFixed(2)}`,
+      });
+      stoppingRef.current = false;
+      return;
+    }
+
+    if (result.peak < SILENCE_PEAK_THRESHOLD) {
+      setFailure({
+        code: "Silent",
+        title: "マイクに音が入っていませんでした",
+        message:
+          "録音はできましたが、ほとんど音が入っていません。マイクを塞いでいないか確認して、もう一度お試しください。",
+        hints: [
+          "Bluetoothイヤホンを接続している場合は外す",
+          "スマホ本体のマイク（画面下部）を手で塞がない",
+          "マイクに向かって少し大きめの声で話す",
+        ],
+        action: "retry",
+      });
+      setAppState("error");
+      reportFailure({
+        stage: "録音",
+        errorName: "Silent",
+        userName,
+        detail: `peak=${result.peak.toFixed(4)}`,
+      });
+      stoppingRef.current = false;
+      return;
+    }
+    // --- ガードここまで ---
+
+    uploadIdRef.current = newUploadId();
+    await sendToServer(result.blob, uploadIdRef.current);
+    stoppingRef.current = false;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clearHardTimeout, releaseWakeLock, userName]);
+
+  const sendToServer = useCallback(
+    async (blob: Blob, uploadId: string) => {
+      setAppState("uploading");
+      setUploadProgress(0);
+      setRetryNotice("");
+
+      try {
+        await uploadRecording({
+          blob,
+          userName,
+          uploadId,
+          onProgress: setUploadProgress,
+          onRetry: (attempt, max) => {
+            setRetryNotice(`通信が不安定です。再送しています… (${attempt}/${max - 1})`);
+          },
+        });
+        setRetryNotice("");
+        setAppState("completed");
+      } catch (e) {
+        console.error("アップロードに失敗:", e);
+        setRetryNotice("");
+        setAppState("uploadFailed");
+        reportFailure({
+          stage: "サーバー送信",
+          errorName: errorNameOf(e),
+          userName,
+          detail: e instanceof Error ? e.message : undefined,
+        });
+      }
+    },
+    [userName]
+  );
+
+  const startRecording = useCallback(() => {
+    const recorder = recorderRef.current;
+    if (!recorder || !recorder.isPrepared()) {
+      setFailure({
+        code: "NotPrepared",
+        title: "録音を開始できませんでした",
+        message: "マイクの準備が完了していません。もう一度お試しください。",
+        hints: [],
+        action: "retry",
+      });
+      setAppState("error");
+      return;
+    }
+
+    stoppingRef.current = false;
+    setAppState("recording");
+
+    // 締め切りは壁時計ではなく実サンプル数で判定する。
+    // 以前は state を切り替えた瞬間から10秒を数えていたため、
+    // マイクが生きるまでの待ち時間の分だけ録音が短くなっていた。
+    recorder.beginCapture(RECORDING_DURATION_SEC, () => {
+      void stopAndUpload();
+    });
+
+    // 万一コールバックが来なかった場合の保険
+    hardTimeoutRef.current = setTimeout(() => {
+      void stopAndUpload();
+    }, RECORDING_HARD_TIMEOUT_MS);
+  }, [stopAndUpload]);
+
+  // 録音中に他アプリ・ホーム画面へ移ると音声が途切れるため中断する
+  useEffect(() => {
+    if (appState !== "countdown" && appState !== "recording") return;
+
+    const onVisibilityChange = () => {
+      if (!document.hidden) return;
+      if (stoppingRef.current) return;
+      stoppingRef.current = true;
+      clearHardTimeout();
+      releaseWakeLock();
+      disposeRecorder();
+      setFailure({
+        code: "Interrupted",
+        title: "録音を中断しました",
+        message:
+          "録音中に画面が切り替わりました。録音が始まったら、終わるまでこの画面を表示したままお待ちください。",
+        hints: ["他のアプリに切り替えない", "画面を消灯させない"],
+        action: "retry",
+      });
+      setAppState("error");
+      reportFailure({ stage: "録音", errorName: "Interrupted", userName });
+      stoppingRef.current = false;
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [appState, clearHardTimeout, releaseWakeLock, disposeRecorder, userName]);
+
+  // ---------------------------------------------------------------- ダウンロード / 共有
+
+  const downloadName = useMemo(
+    () => `${userName.trim() || "voice"}_${new Date().toISOString().slice(0, 10)}.wav`,
+    [userName]
+  );
+
+  const blobUrl = useMemo(
+    () => (recordedBlob ? URL.createObjectURL(recordedBlob) : null),
+    [recordedBlob]
+  );
+
+  useEffect(() => {
+    // レンダーのたびにURLを作って捨てていたリークを解消する
+    return () => {
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+    };
+  }, [blobUrl]);
+
+  const shareFile = useMemo(() => {
+    if (!recordedBlob) return null;
+    try {
+      return new File([recordedBlob], downloadName, { type: "audio/wav" });
+    } catch {
+      return null;
+    }
+  }, [recordedBlob, downloadName]);
+
+  const canShare = useMemo(() => {
+    if (!shareFile || typeof navigator === "undefined" || !navigator.canShare) return false;
+    try {
+      return navigator.canShare({ files: [shareFile] });
+    } catch {
+      return false;
+    }
+  }, [shareFile]);
+
+  const shareRecording = async () => {
+    if (!shareFile) return;
+    try {
+      await navigator.share({
+        files: [shareFile],
+        title: `${userName}さんの声紋録音`,
+      });
+    } catch {
+      // ユーザーがキャンセルした場合など。ダウンロードボタンが併置されているので何もしない
+    }
+  };
+
+  const copyPageUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // クリップボードが使えない環境ではURLをそのまま読んでもらう
+    }
+  };
+
+  // ---------------------------------------------------------------- やり直し
+
+  const retryRecording = () => {
+    clearHardTimeout();
+    releaseWakeLock();
+    disposeRecorder();
+    stoppingRef.current = false;
+    setFailure(null);
+    setRecordedBlob(null);
+    setRecordedDuration(0);
+    setUploadProgress(0);
+    setRetryNotice("");
+    setAppState("micTest");
   };
 
   const resetApp = () => {
-    setAppState("intro");
-    setErrorMsg("");
-    setAnalyser(null);
-    setMicTestAnalyser(null);
-    setMicLevel(0);
+    clearHardTimeout();
+    releaseWakeLock();
+    disposeRecorder();
+    stoppingRef.current = false;
+    setFailure(null);
+    setRecordedBlob(null);
+    setRecordedDuration(0);
+    setUploadProgress(0);
+    setRetryNotice("");
     setUserName("");
+    setAppState("intro");
   };
 
-  // 録音だけやり直し（名前はそのまま）
-  const retryRecording = () => {
-    setAppState("micTest");
-    setAnalyser(null);
+  const retryUpload = () => {
+    if (!recordedBlob) return;
+    if (!uploadIdRef.current) uploadIdRef.current = newUploadId();
+    void sendToServer(recordedBlob, uploadIdRef.current);
   };
 
-  // デバイス別マイク許可ガイド
-  const getMicPermissionGuide = () => {
-    if (deviceType === "ios") {
+  // ---------------------------------------------------------------- 表示部品
+
+  const permissionGuide = useMemo(() => {
+    if (device === "ios") {
       return {
         icon: <Smartphone className="w-8 h-8 md:w-10 md:h-10" />,
         title: "iPhone / iPad",
         steps: [
           "ポップアップで「許可」をタップ",
           "許可画面が出ない場合：",
-          "設定 → Safari → マイク → 許可"
-        ]
+          "設定 → Safari → マイク → 許可",
+        ],
       };
-    } else if (deviceType === "android") {
+    }
+    if (device === "android") {
       return {
         icon: <Smartphone className="w-8 h-8 md:w-10 md:h-10" />,
         title: "Android",
         steps: [
           "ポップアップで「許可」をタップ",
           "許可画面が出ない場合：",
-          "設定 → アプリ → ブラウザ → 権限 → マイク → 許可"
-        ]
-      };
-    } else {
-      return {
-        icon: <Monitor className="w-8 h-8 md:w-10 md:h-10" />,
-        title: "パソコン",
-        steps: [
-          "アドレスバー左の🔒アイコンをクリック",
-          "「マイク」を「許可」に変更",
-          "ページを再読み込み"
-        ]
+          "設定 → アプリ → ブラウザ → 権限 → マイク → 許可",
+        ],
       };
     }
-  };
+    return {
+      icon: <Monitor className="w-8 h-8 md:w-10 md:h-10" />,
+      title: "パソコン",
+      steps: [
+        "アドレスバー左の🔒アイコンをクリック",
+        "「マイク」を「許可」に変更",
+        "ページを再読み込み",
+      ],
+    };
+  }, [device]);
 
-  const permissionGuide = getMicPermissionGuide();
-
-  // 共通のフルスクリーンラッパー
   const FullScreenWrapper = ({ children }: { children: React.ReactNode }) => (
-    <div className="fixed inset-0 z-50 bg-gray-950 flex flex-col items-center justify-center p-4 md:p-8 animate-[fadeIn_0.8s_ease-out]">
+    <div className="fixed inset-0 z-50 bg-gray-950 flex flex-col items-center justify-center p-4 md:p-8 animate-[fadeIn_0.8s_ease-out] overflow-y-auto">
       <style jsx>{`
         @keyframes fadeIn {
           from { opacity: 0; transform: translateY(20px); }
@@ -201,14 +582,19 @@ export default function Home() {
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
         <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[400px] md:w-[600px] h-[400px] md:h-[600px] bg-blue-900/10 rounded-full blur-[100px] md:blur-[120px]" />
       </div>
-      <div className="z-10 w-full max-w-lg flex flex-col items-center text-center">
+      <div className="z-10 w-full max-w-lg flex flex-col items-center text-center my-auto">
         {children}
       </div>
     </div>
   );
 
-  // 確認ボタン
-  const ConfirmButton = ({ onClick, text = "確認しました" }: { onClick: () => void; text?: string }) => (
+  const ConfirmButton = ({
+    onClick,
+    text = "確認しました",
+  }: {
+    onClick: () => void;
+    text?: string;
+  }) => (
     <button
       onClick={onClick}
       className="w-full max-w-sm py-4 md:py-5 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-xl md:rounded-2xl font-bold text-lg md:text-xl hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-blue-900/30 hover:shadow-blue-900/50"
@@ -217,6 +603,92 @@ export default function Home() {
       <ArrowRight className="w-5 h-5 md:w-6 md:h-6" />
     </button>
   );
+
+  const CopyUrlButton = () => (
+    <button
+      onClick={copyPageUrl}
+      className="w-full max-w-sm py-3 bg-gray-800 rounded-xl font-medium text-base text-gray-200 hover:bg-gray-700 transition-colors flex items-center justify-center gap-2"
+    >
+      {copied ? (
+        <>
+          <Check className="w-5 h-5 text-green-400" />
+          コピーしました
+        </>
+      ) : (
+        <>
+          <Copy className="w-5 h-5" />
+          このページのURLをコピー
+        </>
+      )}
+    </button>
+  );
+
+  const DownloadAndShare = ({ tone }: { tone: "blue" | "red" }) => (
+    <div className="w-full max-w-sm space-y-3">
+      {canShare && (
+        <button
+          onClick={shareRecording}
+          className="w-full py-4 bg-gradient-to-r from-green-600 to-emerald-600 rounded-xl font-bold text-lg hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-green-900/30"
+        >
+          <Share2 className="w-5 h-5" />
+          録音を送る（LINEなど）
+        </button>
+      )}
+      {blobUrl && (
+        <a
+          href={blobUrl}
+          download={downloadName}
+          className={cn(
+            "flex items-center justify-center gap-2 w-full py-4 rounded-xl font-bold text-lg transition-all shadow-lg",
+            tone === "blue"
+              ? "bg-gradient-to-r from-blue-600 to-indigo-600 hover:opacity-90 shadow-blue-900/30"
+              : "bg-blue-600 hover:bg-blue-700"
+          )}
+        >
+          <Download className="w-5 h-5" />
+          録音をダウンロード
+        </a>
+      )}
+    </div>
+  );
+
+  // ---------------------------------------------------------------- 非対応環境
+
+  // 機能自体が無い環境（アプリ内WebView・http接続など）は最初に止める
+  if (env && !env.canRecord) {
+    const guide = env.inAppBrowser
+      ? getExternalBrowserGuide(env.inAppBrowser, env.device)
+      : {
+          title: "このブラウザでは録音できません",
+          steps: [
+            "Safari（iPhone）または Chrome（Android）で開いてください",
+            "URLをコピーしてブラウザのアドレスバーに貼り付けてください",
+          ],
+        };
+
+    return (
+      <main className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center p-4">
+        <div className="w-full max-w-lg flex flex-col items-center text-center space-y-6">
+          <ExternalLink className="w-16 h-16 text-yellow-400" />
+          <h2 className="text-2xl md:text-3xl font-bold text-yellow-400">{guide.title}</h2>
+          <div className="w-full bg-gray-900/50 rounded-2xl p-6 border border-gray-800 text-left space-y-3">
+            {guide.steps.map((step, i) => (
+              <div key={i} className="flex items-start gap-3">
+                <span className="text-yellow-400 font-bold">{i + 1}.</span>
+                <p className="text-sm md:text-base text-gray-300">{step}</p>
+              </div>
+            ))}
+          </div>
+          {!env.isSecure && (
+            <p className="text-sm text-red-400">
+              安全な接続（https）で開く必要があります。
+            </p>
+          )}
+          <CopyUrlButton />
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center p-4 relative overflow-hidden">
@@ -236,16 +708,34 @@ export default function Home() {
             声紋診断のための<br />
             <span className="text-white font-medium">高品質な音声録音</span>を行います
           </p>
+
+          {/* アプリ内ブラウザは録音に失敗しやすいので先に警告する */}
+          {env?.inAppBrowser && (
+            <div className="w-full max-w-sm bg-yellow-900/30 border border-yellow-700/50 rounded-xl p-4 mb-6 text-left space-y-3">
+              <p className="text-sm text-yellow-300 font-medium flex items-start gap-2">
+                <ExternalLink className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                このままでは録音できない可能性があります
+              </p>
+              <div className="space-y-1">
+                {getExternalBrowserGuide(env.inAppBrowser, env.device).steps.map((s, i) => (
+                  <p key={i} className="text-xs text-yellow-200/80">
+                    {i + 1}. {s}
+                  </p>
+                ))}
+              </div>
+              <CopyUrlButton />
+            </div>
+          )}
+
           <ConfirmButton onClick={nextStep} text="はじめる" />
 
-          {/* フッター */}
           <div className="absolute bottom-4 md:bottom-6 left-0 right-0 text-center text-xs md:text-sm text-gray-600">
             © 声紋診断アップデート林
           </div>
         </FullScreenWrapper>
       )}
 
-      {/* State: PRIVACY - プライバシーポリシー */}
+      {/* State: PRIVACY */}
       {appState === "privacy" && (
         <FullScreenWrapper>
           <div className="flex items-center justify-center gap-3 text-cyan-400 mb-6">
@@ -337,7 +827,7 @@ export default function Home() {
         </FullScreenWrapper>
       )}
 
-      {/* State: NAME INPUT - 名前入力（アニメーションなし） */}
+      {/* State: NAME INPUT */}
       {appState === "nameInput" && (
         <div className="fixed inset-0 z-50 bg-gray-950 flex flex-col items-center justify-center p-4 md:p-8">
           <div className="absolute inset-0 pointer-events-none overflow-hidden">
@@ -379,7 +869,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* State: MIC TEST - シンプル版 */}
+      {/* State: MIC TEST（許可を取る前） */}
       {appState === "micTest" && (
         <FullScreenWrapper>
           <h2 className="text-2xl md:text-4xl font-bold text-white mb-6 md:mb-8">
@@ -387,7 +877,6 @@ export default function Home() {
           </h2>
 
           <div className="w-full space-y-6 md:space-y-8">
-            {/* マイク許可ガイド */}
             <div className="bg-gray-900/50 backdrop-blur-sm rounded-2xl p-6 md:p-8 border border-gray-800">
               <div className="flex items-center justify-center gap-3 text-cyan-400 mb-4 md:mb-6">
                 {permissionGuide.icon}
@@ -409,19 +898,14 @@ export default function Home() {
               </div>
             </div>
 
-            <p className="text-sm md:text-base text-cyan-400/80 text-center mb-2">
-              ※ 許可後、<span className="font-bold">3→2→1</span> のカウントダウンで録音開始します
-            </p>
-
             <button
               onClick={requestMicPermissionAndProceed}
               className="w-full max-w-sm mx-auto py-4 md:py-5 bg-gradient-to-r from-cyan-600 to-blue-600 rounded-xl md:rounded-2xl font-bold text-lg md:text-xl hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-cyan-900/30"
             >
               <Mic className="w-5 h-5 md:w-6 md:h-6" />
-              マイクを許可して録音開始
+              マイクを許可する
             </button>
 
-            {/* 他のデバイスもみる */}
             <details className="text-gray-500 text-sm">
               <summary className="cursor-pointer hover:text-gray-300 flex items-center gap-2 justify-center">
                 <Settings className="w-4 h-4" />
@@ -446,19 +930,70 @@ export default function Home() {
         </FullScreenWrapper>
       )}
 
-      <div className="z-10 w-full max-w-md flex flex-col items-center space-y-6 md:space-y-8">
+      {/* State: MIC READY（許可済み・音量確認） */}
+      {appState === "micReady" && (
+        <FullScreenWrapper>
+          <div className="flex items-center justify-center gap-2 text-green-400 mb-4">
+            <CheckCircle2 className="w-6 h-6" />
+            <span className="font-medium">マイクを使用できます</span>
+          </div>
+          <h2 className="text-2xl md:text-3xl font-bold text-white mb-4">
+            声が届いているか確認
+          </h2>
+          <p className="text-sm md:text-base text-gray-400 mb-6">
+            「あー」と声を出して、下のバーが動くことを確認してください
+          </p>
 
-        {/* Header (メイン画面用) */}
-        {!["intro", "privacy", "step1", "step2", "step3", "micTest"].includes(appState) && (
+          <div className="w-full max-w-sm mb-2">
+            <div className="w-full h-6 bg-gray-800 rounded-full overflow-hidden border border-gray-700">
+              <div
+                className={cn(
+                  "h-full transition-[width] duration-75",
+                  micLevel > 0.05 ? "bg-green-500" : "bg-gray-600"
+                )}
+                style={{ width: `${Math.min(100, Math.round(micLevel * 140))}%` }}
+              />
+            </div>
+          </div>
+          <p
+            className={cn(
+              "text-sm mb-8 h-5",
+              micLevel > 0.05 ? "text-green-400" : "text-gray-500"
+            )}
+          >
+            {micLevel > 0.05 ? "音を検出しています" : "声を出すとバーが伸びます"}
+          </p>
+
+          <button
+            onClick={() => setAppState("countdown")}
+            className="w-full max-w-sm py-4 md:py-5 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-xl md:rounded-2xl font-bold text-lg md:text-xl hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-blue-900/30"
+          >
+            録音を開始する
+            <ArrowRight className="w-5 h-5 md:w-6 md:h-6" />
+          </button>
+
+          <p className="text-sm text-cyan-400/80 mt-4">
+            ※ <span className="font-bold">3→2→1</span> のカウントダウンのあと、
+            {RECORDING_DURATION_SEC}秒間録音します
+          </p>
+          <p className="text-xs text-yellow-400/80 mt-2">
+            録音が終わるまで、他のアプリに切り替えないでください
+          </p>
+        </FullScreenWrapper>
+      )}
+
+      <div className="z-10 w-full max-w-md flex flex-col items-center space-y-6 md:space-y-8">
+        {/* Header（メイン画面用） */}
+        {!["intro", "privacy", "step1", "step2", "step3", "micTest", "micReady"].includes(
+          appState
+        ) && (
           <h1 className="text-2xl md:text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400">
             声紋診断レコーダー
           </h1>
         )}
 
         {/* State: COUNTDOWN */}
-        {appState === "countdown" && (
-          <GlowCountdown onComplete={startRecording} />
-        )}
+        {appState === "countdown" && <GlowCountdown onComplete={startRecording} />}
 
         {/* State: RECORDING */}
         {appState === "recording" && (
@@ -468,24 +1003,45 @@ export default function Home() {
             </div>
             {analyser && <AudioVisualizer analyser={analyser} isRecording={true} />}
             <div className="w-full h-3 md:h-4 bg-gray-800 rounded-full overflow-hidden">
-              <div className="h-full bg-cyan-500" style={{ animation: 'progress 10s linear forwards' }} />
+              <div
+                className="h-full bg-cyan-500"
+                style={{
+                  animation: `progress ${RECORDING_DURATION_SEC}s linear forwards`,
+                }}
+              />
               <style jsx>{`
-                 @keyframes progress {
-                   from { width: 0%; }
-                   to { width: 100%; }
-                 }
-               `}</style>
+                @keyframes progress {
+                  from { width: 0%; }
+                  to { width: 100%; }
+                }
+              `}</style>
             </div>
+            <p className="text-xs text-yellow-400/80">
+              他のアプリに切り替えないでください
+            </p>
           </div>
         )}
 
         {/* State: UPLOADING */}
         {appState === "uploading" && (
-          <div className="flex flex-col items-center space-y-4 md:space-y-6">
+          <div className="flex flex-col items-center space-y-4 md:space-y-6 w-full">
             <Loader2 className="w-16 h-16 md:w-20 md:h-20 text-blue-500 animate-spin" />
             <p className="text-lg md:text-2xl font-medium">保存中...</p>
-            <p className="text-sm md:text-base text-gray-500">この処理には数秒かかる場合があります</p>
-            <p className="text-xs text-red-400 animate-pulse">⚠️ 完了するまでブラウザを閉じないでください</p>
+            <div className="w-full max-w-sm h-3 bg-gray-800 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-blue-500 transition-[width] duration-200"
+                style={{ width: `${Math.round(uploadProgress * 100)}%` }}
+              />
+            </div>
+            <p className="text-sm md:text-base text-gray-500">
+              {Math.round(uploadProgress * 100)}%
+            </p>
+            {retryNotice && (
+              <p className="text-sm text-yellow-400 animate-pulse">{retryNotice}</p>
+            )}
+            <p className="text-xs text-red-400 animate-pulse">
+              ⚠️ 完了するまでブラウザを閉じないでください
+            </p>
           </div>
         )}
 
@@ -501,7 +1057,6 @@ export default function Home() {
               </p>
             </div>
 
-            {/* メインメッセージ: ブラウザを閉じてOK */}
             <div className="w-full max-w-sm bg-green-900/30 border border-green-700/50 rounded-xl p-4 text-center">
               <p className="text-green-300 font-medium text-base md:text-lg">
                 ✓ このままブラウザを閉じてOKです
@@ -512,7 +1067,6 @@ export default function Home() {
               ※ 音声データは分析完了後、速やかに削除いたします
             </p>
 
-            {/* やり直しボタン - 控えめに */}
             <div className="w-full max-w-sm pt-4 border-t border-gray-800">
               <p className="text-xs text-gray-500 text-center mb-2">
                 録音をやり直したい場合のみ
@@ -525,57 +1079,44 @@ export default function Home() {
               </button>
             </div>
 
-            <div className="text-xs text-gray-600 mt-4">
-              © 声紋診断アップデート林
-            </div>
+            <div className="text-xs text-gray-600 mt-4">© 声紋診断アップデート林</div>
           </div>
         )}
 
-        {/* State: iOS DOWNLOAD - iPhoneユーザー用ダウンロード画面 */}
-        {appState === "iosDownload" && recordedBlob && (
-          <div className="flex flex-col items-center space-y-6 md:space-y-8 bg-blue-950/20 p-8 md:p-12 rounded-3xl border border-blue-900/50">
-            <CheckCircle2 className="w-20 h-20 md:w-24 md:h-24 text-blue-500" />
+        {/* State: UPLOAD FAILED - 保存できなかったことを正直に伝える */}
+        {appState === "uploadFailed" && (
+          <div className="flex flex-col items-center space-y-6 bg-yellow-950/20 p-8 md:p-10 rounded-3xl border border-yellow-900/50">
+            <AlertCircle className="w-20 h-20 md:w-24 md:h-24 text-yellow-500" />
             <div className="text-center">
-              <h2 className="text-2xl md:text-3xl font-bold text-blue-400 mb-3">録音完了！</h2>
+              <h2 className="text-xl md:text-2xl font-bold text-yellow-400 mb-2">
+                サーバーに保存できませんでした
+              </h2>
               <p className="text-gray-300 text-base md:text-lg">
-                {userName}さんの声紋診断データを録音しました
+                録音自体は成功しています（{recordedDuration.toFixed(1)}秒）。<br />
+                下のボタンで録音データを保存し、<br />
+                公式LINEでアップデート林にお送りください。
               </p>
             </div>
 
-            <div className="w-full max-w-sm bg-blue-900/30 border border-blue-700/50 rounded-xl p-4 text-center space-y-4">
-              <p className="text-blue-300 font-medium text-base md:text-lg">
-                📱 下のボタンでダウンロードして<br />
-                公式LINEでアップデート林に送ってください
-              </p>
-              <a
-                href={URL.createObjectURL(recordedBlob)}
-                download={`${userName || 'voice'}_${new Date().toISOString().slice(0, 10)}.wav`}
-                className="block w-full py-4 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-xl font-bold text-lg hover:opacity-90 transition-all shadow-lg shadow-blue-900/30"
+            <DownloadAndShare tone="blue" />
+
+            <div className="w-full max-w-sm space-y-3 pt-4 border-t border-gray-800">
+              <button
+                onClick={retryUpload}
+                className="w-full py-3 bg-gray-700 rounded-xl text-sm font-medium text-gray-200 hover:bg-gray-600 transition-colors flex items-center justify-center gap-2"
               >
-                録音をダウンロード
-              </a>
-            </div>
-
-            <p className="text-xs md:text-sm text-gray-400 text-center">
-              ダウンロードしたデータを公式LINEで<br />
-              アップデート林に送ってください
-            </p>
-
-            <div className="w-full max-w-sm pt-4 border-t border-gray-800">
-              <p className="text-xs text-gray-500 text-center mb-2">
-                録音をやり直したい場合
-              </p>
+                <RefreshCw className="w-4 h-4" />
+                もう一度サーバーに送信する
+              </button>
               <button
                 onClick={retryRecording}
-                className="w-full py-2 bg-gray-700 rounded-lg text-sm text-gray-300 hover:bg-gray-600 transition-colors"
+                className="w-full py-2 bg-gray-800 rounded-lg text-sm text-gray-400 hover:bg-gray-700 transition-colors"
               >
                 録音し直す
               </button>
             </div>
 
-            <div className="text-xs text-gray-600 mt-4">
-              © 声紋診断アップデート林
-            </div>
+            <div className="text-xs text-gray-600 mt-2">© 声紋診断アップデート林</div>
           </div>
         )}
 
@@ -584,32 +1125,58 @@ export default function Home() {
           <div className="flex flex-col items-center space-y-6 bg-red-950/20 p-8 md:p-10 rounded-3xl border border-red-900/50">
             <AlertCircle className="w-20 h-20 md:w-24 md:h-24 text-red-500" />
             <div className="text-center">
-              <h2 className="text-xl md:text-2xl font-bold text-red-400 mb-2">エラーが発生しました</h2>
-              <p className="text-gray-300 text-base md:text-lg">{errorMsg || "不明なエラーです"}</p>
+              <h2 className="text-xl md:text-2xl font-bold text-red-400 mb-2">
+                {failure?.title ?? "エラーが発生しました"}
+              </h2>
+              <p className="text-gray-300 text-base md:text-lg">
+                {failure?.message ?? "不明なエラーです"}
+              </p>
             </div>
 
-            {/* 録音データがある場合はダウンロードボタンを表示 */}
-            {recordedBlob && (
+            {failure?.hints && failure.hints.length > 0 && (
+              <div className="w-full max-w-sm bg-gray-900/50 rounded-xl p-4 border border-gray-800 text-left space-y-2">
+                {failure.hints.map((hint, i) => (
+                  <p key={i} className="text-sm text-gray-300 flex items-start gap-2">
+                    <span className="text-cyan-400">・</span>
+                    {hint}
+                  </p>
+                ))}
+              </div>
+            )}
+
+            {failure?.action === "externalBrowser" && <CopyUrlButton />}
+
+            {/* 録音が取れている場合のみ、手元に保存する手段を出す */}
+            {recordedBlob && recordedDuration >= 3 && (
               <div className="w-full max-w-sm space-y-3">
                 <p className="text-sm text-yellow-400 text-center">
-                  📱 iPhoneをお使いの場合は、下のボタンで録音をダウンロードしてLINEで送信してください
+                  録音データは手元に残っています
                 </p>
-                <a
-                  href={URL.createObjectURL(recordedBlob)}
-                  download={`${userName || 'voice'}_${new Date().toISOString().slice(0, 10)}.wav`}
-                  className="block w-full py-3 bg-blue-600 rounded-xl font-bold text-center text-lg hover:bg-blue-700 transition-colors"
-                >
-                  録音をダウンロード
-                </a>
+                <DownloadAndShare tone="red" />
               </div>
+            )}
+
+            {failure?.action !== "none" && (
+              <button
+                onClick={retryRecording}
+                className="w-full max-w-sm py-4 bg-red-600 rounded-xl font-bold text-lg hover:bg-red-700 transition-colors"
+              >
+                もう一度試す
+              </button>
             )}
 
             <button
               onClick={resetApp}
-              className="w-full max-w-sm py-4 bg-red-600 rounded-xl font-bold text-lg hover:bg-red-700 transition-colors"
+              className="text-sm text-gray-500 hover:text-gray-300 transition-colors"
             >
-              もう一度試す
+              最初からやり直す
             </button>
+
+            {failure?.code && (
+              <p className="text-[10px] text-gray-600">
+                エラーコード: {failure.code}
+              </p>
+            )}
           </div>
         )}
       </div>

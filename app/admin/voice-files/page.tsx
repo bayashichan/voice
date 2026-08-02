@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useRef } from "react";
-import { Trash2, Download, RefreshCw, Lock, FileAudio, AlertCircle, Play, Pause, Square } from "lucide-react";
-import { WORKERS_API_URL, ADMIN_PASSWORD } from "@/utils/config";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { Trash2, Download, RefreshCw, Lock, FileAudio, AlertCircle, Play, Square, LogOut } from "lucide-react";
+import { WORKERS_API_URL } from "@/utils/config";
 
 interface AudioFile {
     name: string;
@@ -10,9 +10,15 @@ interface AudioFile {
     uploaded: string;
 }
 
+const TOKEN_STORAGE_KEY = "voice-admin-token";
+
 export default function AdminPage() {
     const [isAuthenticated, setIsAuthenticated] = useState(false);
     const [password, setPassword] = useState("");
+    // 入力されたパスワードをそのままAPIトークンとして使う。
+    // 以前は config.ts の定数を参照していたため、パスワードが
+    // 全訪問者に配信されるJSバンドルに埋め込まれていた。
+    const [token, setToken] = useState("");
     const [files, setFiles] = useState<AudioFile[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
@@ -21,27 +27,17 @@ export default function AdminPage() {
     const [audioUrl, setAudioUrl] = useState<string | null>(null);
     const audioRef = useRef<HTMLAudioElement>(null);
 
-    // 認証チェック
-    const handleLogin = () => {
-        if (password === ADMIN_PASSWORD) {
-            setIsAuthenticated(true);
-            setError("");
-            fetchFiles();
-        } else {
-            setError("パスワードが正しくありません");
-        }
-    };
+    const authHeaders = (t: string) => ({ Authorization: `Bearer ${t}` });
 
     // ファイル一覧取得
-    const fetchFiles = async () => {
+    const fetchFiles = useCallback(async (t: string) => {
         setLoading(true);
         setError("");
         try {
             const response = await fetch(`${WORKERS_API_URL}/list`, {
-                headers: {
-                    Authorization: `Bearer ${ADMIN_PASSWORD}`,
-                },
+                headers: authHeaders(t),
             });
+            if (response.status === 401) throw new Error("パスワードが正しくありません");
             if (!response.ok) throw new Error("ファイル一覧の取得に失敗しました");
             const data = await response.json() as { files: AudioFile[] };
             setFiles(data.files.sort((a, b) =>
@@ -49,10 +45,50 @@ export default function AdminPage() {
             ));
         } catch (e) {
             setError(e instanceof Error ? e.message : "エラーが発生しました");
+            throw e;
         } finally {
             setLoading(false);
         }
+    }, []);
+
+    // 認証チェック（サーバーに問い合わせて判定する）
+    const handleLogin = async () => {
+        const entered = password.trim();
+        if (!entered) {
+            setError("パスワードを入力してください");
+            return;
+        }
+        try {
+            await fetchFiles(entered);
+            setToken(entered);
+            setIsAuthenticated(true);
+            setPassword("");
+            sessionStorage.setItem(TOKEN_STORAGE_KEY, entered);
+        } catch {
+            // fetchFiles 側でエラーメッセージを設定済み
+        }
     };
+
+    const handleLogout = () => {
+        sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+        setToken("");
+        setIsAuthenticated(false);
+        setFiles([]);
+        setSelectedFiles(new Set());
+    };
+
+    // タブを開いている間だけ再入力を省く
+    useEffect(() => {
+        const saved = sessionStorage.getItem(TOKEN_STORAGE_KEY);
+        if (!saved) return;
+        setToken(saved);
+        setIsAuthenticated(true);
+        void fetchFiles(saved).catch(() => {
+            sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+            setToken("");
+            setIsAuthenticated(false);
+        });
+    }, [fetchFiles]);
 
     // 音声プレビュー再生
     const playPreview = async (fileName: string) => {
@@ -70,7 +106,7 @@ export default function AdminPage() {
 
             const response = await fetch(`${WORKERS_API_URL}/download/${encodeURIComponent(fileName)}`, {
                 headers: {
-                    Authorization: `Bearer ${ADMIN_PASSWORD}`,
+                    ...authHeaders(token),
                 },
             });
             if (!response.ok) throw new Error("音声の取得に失敗しました");
@@ -114,7 +150,7 @@ export default function AdminPage() {
         try {
             const response = await fetch(`${WORKERS_API_URL}/download/${encodeURIComponent(fileName)}`, {
                 headers: {
-                    Authorization: `Bearer ${ADMIN_PASSWORD}`,
+                    ...authHeaders(token),
                 },
             });
             if (!response.ok) throw new Error("ダウンロードに失敗しました");
@@ -146,7 +182,7 @@ export default function AdminPage() {
             const response = await fetch(`${WORKERS_API_URL}/delete/${encodeURIComponent(fileName)}`, {
                 method: "DELETE",
                 headers: {
-                    Authorization: `Bearer ${ADMIN_PASSWORD}`,
+                    ...authHeaders(token),
                 },
             });
             if (!response.ok) throw new Error("削除に失敗しました");
@@ -174,7 +210,7 @@ export default function AdminPage() {
                 await fetch(`${WORKERS_API_URL}/delete/${encodeURIComponent(fileName)}`, {
                     method: "DELETE",
                     headers: {
-                        Authorization: `Bearer ${ADMIN_PASSWORD}`,
+                        ...authHeaders(token),
                     },
                 });
             } catch (e) {
@@ -182,7 +218,7 @@ export default function AdminPage() {
             }
         }
         setSelectedFiles(new Set());
-        fetchFiles();
+        void fetchFiles(token).catch(() => undefined);
     };
 
     // ファイルサイズのフォーマット
@@ -248,17 +284,20 @@ export default function AdminPage() {
                         type="password"
                         value={password}
                         onChange={(e) => setPassword(e.target.value)}
-                        onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+                        onKeyDown={(e) => {
+                            if (e.key === "Enter") void handleLogin();
+                        }}
                         placeholder="パスワード"
                         className="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
                         autoFocus
                     />
 
                     <button
-                        onClick={handleLogin}
-                        className="w-full py-3 bg-blue-600 rounded-lg font-bold hover:bg-blue-700 transition-colors"
+                        onClick={() => void handleLogin()}
+                        disabled={loading}
+                        className="w-full py-3 bg-blue-600 rounded-lg font-bold hover:bg-blue-700 transition-colors disabled:opacity-50"
                     >
-                        ログイン
+                        {loading ? "確認中..." : "ログイン"}
                     </button>
                 </div>
             </main>
@@ -283,13 +322,23 @@ export default function AdminPage() {
                         <FileAudio className="w-6 h-6 text-blue-400" />
                         録音データ管理
                     </h1>
-                    <button
-                        onClick={fetchFiles}
-                        disabled={loading}
-                        className="p-2 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors disabled:opacity-50"
-                    >
-                        <RefreshCw className={`w-5 h-5 ${loading ? "animate-spin" : ""}`} />
-                    </button>
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={() => void fetchFiles(token).catch(() => undefined)}
+                            disabled={loading}
+                            className="p-2 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors disabled:opacity-50"
+                            title="再読み込み"
+                        >
+                            <RefreshCw className={`w-5 h-5 ${loading ? "animate-spin" : ""}`} />
+                        </button>
+                        <button
+                            onClick={handleLogout}
+                            className="p-2 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors"
+                            title="ログアウト"
+                        >
+                            <LogOut className="w-5 h-5" />
+                        </button>
+                    </div>
                 </div>
 
                 {/* エラー表示 */}

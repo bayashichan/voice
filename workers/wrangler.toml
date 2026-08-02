@@ -8,7 +8,14 @@ account_id = "bdd15eda0973e0e1b9bafb767938f48c"
 binding = "RECORDINGS"
 bucket_name = "voice-recordings"
 
-# 環境変数（デプロイ後に設定）
-[vars]
-ADMIN_PASSWORD = "bayashi-voice-2026"
-GAS_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwDwK7mXEpYZvD5psFufrhlpdYPMPHyczz4ag2d2a0RzDuCNvJ-IdTsE8D4q-eQUGgAig/exec"
+# ⚠️ 秘密情報は [vars] に書かない（このファイルはGitに入る）。
+#    以下のコマンドでシークレットとして登録すること:
+#
+#      npx wrangler secret put ADMIN_PASSWORD
+#      npx wrangler secret put GAS_WEB_APP_URL
+#
+#    ADMIN_PASSWORD は以前このファイルとフロントエンドのバンドルに
+#    平文で含まれていたため、必ず新しい値に変更すること。
+#
+#    ローカル開発時は workers/.dev.vars に同じキーを書けば読み込まれる
+#    （.dev.vars は .gitignore 済み）。
