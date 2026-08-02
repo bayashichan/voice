@@ -19,17 +19,30 @@ const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 const ID_INDEX_PREFIX = "_ids/";
 
 /** 管理APIを呼べるオリジン */
-const ADMIN_ORIGIN_PATTERNS = [
-    /^https:\/\/([a-z0-9-]+\.)?voice-recorder-aba\.pages\.dev$/i,
-    /^http:\/\/localhost(:\d+)?$/i,
-    /^http:\/\/127\.0\.0\.1(:\d+)?$/i,
-];
-
 // 誰でも呼べるエンドポイント（アップロード・失敗報告）用のCORSヘッダー
 const publicCorsHeaders: Record<string, string> = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Max-Age": "86400",
+};
+
+/**
+ * 管理APIのCORS。
+ *
+ * オリジンの許可リストは意図的に設けない。
+ * - 認証は管理者が手で入力する Bearer トークンで、Cookie のように
+ *   ブラウザが自動送信する資格情報は使っていない。よって悪意のあるサイトは
+ *   トークンを読むことも付与することもできず、CORS を絞っても防御にならない。
+ * - 一方この構成はフロントエンドの配信元が複数ある（Vercel の本番URL、
+ *   デプロイごとに変わる Vercel のプレビューURL、Cloudflare Pages、ローカル開発）。
+ *   許可リストにすると管理画面から締め出される事故だけが起きる。
+ * 実質的な境界は checkAuth() の Bearer トークンである。
+ */
+const adminCorsHeaders: Record<string, string> = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Max-Age": "86400",
 };
 
@@ -41,23 +54,8 @@ function isAdminPath(path: string): boolean {
     );
 }
 
-/** 管理APIは呼び出し元オリジンを限定する（Bearerトークンに加えた多層防御） */
-function adminCorsHeaders(request: Request): Record<string, string> {
-    const origin = request.headers.get("Origin");
-    const headers: Record<string, string> = {
-        "Access-Control-Allow-Methods": "GET, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
-        "Access-Control-Max-Age": "86400",
-        Vary: "Origin",
-    };
-    if (origin && ADMIN_ORIGIN_PATTERNS.some((re) => re.test(origin))) {
-        headers["Access-Control-Allow-Origin"] = origin;
-    }
-    return headers;
-}
-
-function corsHeadersFor(request: Request, path: string): Record<string, string> {
-    return isAdminPath(path) ? adminCorsHeaders(request) : publicCorsHeaders;
+function corsHeadersFor(_request: Request, path: string): Record<string, string> {
+    return isAdminPath(path) ? adminCorsHeaders : publicCorsHeaders;
 }
 
 // 認証チェック
