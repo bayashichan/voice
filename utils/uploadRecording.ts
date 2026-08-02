@@ -45,13 +45,32 @@ export async function uploadRecording(
     options: UploadRecordingOptions
 ): Promise<UploadRecordingResult> {
     const maxAttempts = RETRY_DELAYS_MS.length + 1;
+    let mode: UploadMode = "binary";
+    let switchedToLegacy = false;
     let lastError: unknown;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-            return await sendOnce(options);
+            return await sendOnce(options, mode);
         } catch (e) {
             lastError = e;
+
+            // Pages と Workers は別々にデプロイされるため、まだ旧 Worker が
+            // 動いている瞬間がありうる。旧 Worker はバイナリを受け取ると
+            // request.json() で落ちて500を返すので、その場合だけ旧形式
+            // （Base64+JSON）に切り替えて即座に送り直す。
+            // これによりデプロイ順序が前後してもアップロードが全滅しない。
+            if (
+                mode === "binary" &&
+                !switchedToLegacy &&
+                e instanceof UploadError &&
+                e.status === 500
+            ) {
+                switchedToLegacy = true;
+                mode = "legacy";
+                options.onProgress?.(0);
+                continue;
+            }
 
             const retryable = !(e instanceof UploadError) || e.retryable;
             if (!retryable || attempt === maxAttempts) break;
@@ -67,8 +86,43 @@ export async function uploadRecording(
         : new UploadError("アップロードに失敗しました", 0, false);
 }
 
-function sendOnce(options: UploadRecordingOptions): Promise<UploadRecordingResult> {
+type UploadMode = "binary" | "legacy";
+
+/** 旧 Worker 向けフォールバック用。Blob を Base64 文字列にする。 */
+function blobToBase64(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            const result = reader.result as string;
+            const comma = result.indexOf(",");
+            resolve(comma >= 0 ? result.slice(comma + 1) : result);
+        };
+        reader.onerror = () => reject(new UploadError("データ変換に失敗しました", 0, false));
+        reader.readAsDataURL(blob);
+    });
+}
+
+async function sendOnce(
+    options: UploadRecordingOptions,
+    mode: UploadMode
+): Promise<UploadRecordingResult> {
     const { blob, userName, uploadId, onProgress } = options;
+
+    let body: Blob | string;
+    let contentType: string;
+
+    if (mode === "legacy") {
+        contentType = "application/json";
+        body = JSON.stringify({
+            fileData: await blobToBase64(blob),
+            mimeType: "audio/wav",
+            userName,
+            uploadId,
+        });
+    } else {
+        contentType = "audio/wav";
+        body = blob;
+    }
 
     return new Promise<UploadRecordingResult>((resolve, reject) => {
         const url =
@@ -80,7 +134,7 @@ function sendOnce(options: UploadRecordingOptions): Promise<UploadRecordingResul
         xhr.open("POST", url, true);
         xhr.responseType = "text";
         xhr.timeout = ATTEMPT_TIMEOUT_MS;
-        xhr.setRequestHeader("Content-Type", "audio/wav");
+        xhr.setRequestHeader("Content-Type", contentType);
 
         xhr.upload.onprogress = (event) => {
             if (event.lengthComputable && event.total > 0) {
@@ -124,7 +178,7 @@ function sendOnce(options: UploadRecordingOptions): Promise<UploadRecordingResul
             reject(new UploadError("中断されました", 0, false));
         };
 
-        xhr.send(blob);
+        xhr.send(body);
     });
 }
 
