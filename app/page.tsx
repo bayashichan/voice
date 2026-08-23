@@ -66,6 +66,24 @@ interface MicAttemptDiagnostics {
   permission: string;
   /** iOS の本物のブラウザなら true。アプリ内蔵の WebView では false */
   standalone: boolean;
+  /** 見えている音声入力デバイスの数。-1 は取得できなかったことを表す */
+  audioInputs: number;
+}
+
+/**
+ * 音声入力デバイスの数を数える。
+ * 端末側でマイクが禁止されている（スクリーンタイムの制限など）と
+ * 0 件になることがあり、「許可画面が出ないまま失敗する」ケースの手がかりになる。
+ * ブラウザによって権限取得前の挙動が違うため、判定には使わず記録だけする。
+ */
+async function countAudioInputs(): Promise<number> {
+  try {
+    if (!navigator.mediaDevices?.enumerateDevices) return -1;
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.filter((d) => d.kind === "audioinput").length;
+  } catch {
+    return -1;
+  }
 }
 
 /** マイク権限の状態。Safari では未対応のこともあるので必ず握りつぶす */
@@ -170,6 +188,8 @@ export default function Home() {
   const [appState, setAppState] = useState<AppState>("intro");
   const [env, setEnv] = useState<EnvironmentInfo | null>(null);
   const [failure, setFailure] = useState<MicErrorInfo | null>(null);
+  /** 問い合わせのときにスクリーンショットで送ってもらう診断文字列 */
+  const [diagnostic, setDiagnostic] = useState<string>("");
   const [userName, setUserName] = useState<string>("");
 
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
@@ -245,6 +265,7 @@ export default function Home() {
       releaseWakeLock();
       disposeRecorder();
       setFailure(info);
+      setDiagnostic(detail ?? "");
       setAppState("error");
       reportFailure({ stage, errorName: info.code, userName, detail });
     },
@@ -262,7 +283,8 @@ export default function Home() {
           `permission=${diag.permission}`,
           `inApp=${inApp ?? "none"}`,
           `likelyInApp=${env?.likelyInAppBrowser ?? false}`,
-          `standalone=${diag.standalone}`
+          `standalone=${diag.standalone}`,
+          `audioInputs=${diag.audioInputs}`
         );
       }
       const detail = detailParts.join(" / ");
@@ -279,18 +301,28 @@ export default function Home() {
 
         if (blockedByPlatform) {
           const guide = getExternalBrowserGuide(inApp, device);
+          // 原因は「アプリ内ブラウザ」と「端末側でマイクが禁止されている」の
+          // 2通りある。どちらかを断定できないので、両方の手順を順番に出す。
+          const deviceLevelHints =
+            device === "ios"
+              ? [
+                "― Safariで開いているのにこの表示が出る場合 ―",
+                "設定 → スクリーンタイム → コンテンツとプライバシーの制限 → マイク →「許可」",
+                "設定 → Safari → マイク →「確認」",
+                "上を直したら、Safariのタブを一度閉じてから開き直してください",
+              ]
+              : [
+                "― ブラウザで直接開いているのにこの表示が出る場合 ―",
+                "アドレスバーの🔒からマイクを「許可」に変更してください",
+              ];
+
           fail(
             {
               code: info.code,
               title: "マイクの許可画面が出ませんでした",
               message:
-                "LINEなどのアプリ内ブラウザで開いていると、許可を尋ねられないまま録音がブロックされます。下の手順で Safari / Chrome で開き直してください。",
-              hints: [
-                ...guide.steps,
-                device === "ios"
-                  ? "Safariで開いていてこの表示が出る場合は、設定 → Safari → マイク を「確認」に変更してください"
-                  : "ブラウザで開いていてこの表示が出る場合は、アドレスバーの🔒からマイクを「許可」に変更してください",
-              ],
+                "許可を尋ねられないまま録音がブロックされました。LINEなどのアプリ内ブラウザで開いている場合と、端末側でマイクが禁止されている場合があります。",
+              hints: [...guide.steps, ...deviceLevelHints],
               action: "externalBrowser",
             },
             stage,
@@ -346,6 +378,7 @@ export default function Home() {
         elapsedMs: Date.now() - startedAt,
         permission: await readMicPermissionState(),
         standalone: typeof navigator !== "undefined" && "standalone" in navigator,
+        audioInputs: await countAudioInputs(),
       };
       failFromException(e, "マイク準備", diag);
     }
@@ -633,6 +666,7 @@ export default function Home() {
     disposeRecorder();
     stoppingRef.current = false;
     setFailure(null);
+    setDiagnostic("");
     setRecordedBlob(null);
     setRecordedDuration(0);
     setUploadProgress(0);
@@ -646,6 +680,7 @@ export default function Home() {
     disposeRecorder();
     stoppingRef.current = false;
     setFailure(null);
+    setDiagnostic("");
     setRecordedBlob(null);
     setRecordedDuration(0);
     setUploadProgress(0);
@@ -1232,9 +1267,21 @@ export default function Home() {
             </button>
 
             {failure?.code && (
-              <p className="text-[10px] text-gray-600">
-                エラーコード: {failure.code}
-              </p>
+              <div className="w-full max-w-sm text-center space-y-1">
+                <p className="text-[10px] text-gray-600">
+                  エラーコード: {failure.code}
+                </p>
+                {diagnostic && (
+                  <>
+                    <p className="text-[10px] text-gray-600">
+                      解決しない場合は、この画面のスクリーンショットをお送りください
+                    </p>
+                    <p className="text-[10px] text-gray-700 break-all select-all">
+                      {diagnostic}
+                    </p>
+                  </>
+                )}
+              </div>
             )}
           </div>
         )}
