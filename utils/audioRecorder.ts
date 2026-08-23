@@ -1,3 +1,10 @@
+export interface MicMetrics {
+  /** 直近フレームの最大振幅 0..1 */
+  peak: number;
+  /** 直近フレームの実効値 0..1 */
+  rms: number;
+}
+
 export interface PreparedRecorder {
   analyser: AnalyserNode;
   sampleRate: number;
@@ -26,6 +33,20 @@ function getAudioContextCtor(): AudioContextCtor | null {
     null
   );
 }
+
+/**
+ * すべて ideal 指定にする。exact 相当の指定だと 48kHz 固定の端末で
+ * OverconstrainedError になり、フォールバックで音声処理OFFの指定ごと失われていた。
+ */
+const PRIMARY_CONSTRAINTS: MediaStreamConstraints = {
+  audio: {
+    channelCount: { ideal: 1 },
+    sampleRate: { ideal: 48000 },
+    echoCancellation: { ideal: false },
+    noiseSuppression: { ideal: false },
+    autoGainControl: { ideal: false },
+  },
+};
 
 /**
  * 録音エンジン。
@@ -71,19 +92,23 @@ export class AudioRecorder {
       throw new TypeError("getUserMedia is not supported");
     }
 
+    // ★ iOS Safari ではタップと同じタスクの中で getUserMedia を呼ばないと
+    //   ユーザー操作（transient activation）が切れたと見なされ、許可ダイアログを
+    //   出さないまま NotAllowedError で即座に失敗する。
+    //   以前はこの前に `await ctx.resume()` を挟んでいたため、
+    //   すでに許可済みの端末（開発者の実機）では動くのに、
+    //   初めて開いた人だけが「マイク準備 / NotAllowedError」で弾かれていた。
+    //   よって getUserMedia を最初の非同期処理にする。
+    const streamPromise = navigator.mediaDevices.getUserMedia(PRIMARY_CONSTRAINTS);
+    // await が付くまでの間に reject されても unhandledrejection にしない
+    streamPromise.catch(() => undefined);
+
     const ctx = new Ctor();
     this.audioContext = ctx;
     this.sampleRate = ctx.sampleRate;
-    // --- ここまで同期 ---
-
-    // ユーザー操作の権限が生きているうちに resume する
-    if (ctx.state !== "running") {
-      try {
-        await ctx.resume();
-      } catch {
-        // resume に失敗しても getUserMedia 後に再試行する
-      }
-    }
+    // resume も操作直後に始めるが、await して getUserMedia を待たせない
+    void ctx.resume().catch(() => undefined);
+    // --- ここまで同期。getUserMedia はタップと同じタスクで発行済み ---
 
     ctx.onstatechange = () => {
       // iOS では着信やバックグラウンド移行で "interrupted" / "suspended" になる
@@ -92,7 +117,7 @@ export class AudioRecorder {
       }
     };
 
-    this.mediaStream = await this.acquireStream();
+    this.mediaStream = await this.awaitStream(streamPromise);
 
     // resume が保留になっていた場合に備えてもう一度確認する
     if (ctx.state !== "running") {
@@ -105,16 +130,19 @@ export class AudioRecorder {
 
     this.source = ctx.createMediaStreamSource(this.mediaStream);
 
-    this.analyser = ctx.createAnalyser();
-    this.analyser.fftSize = 2048;
-    this.levelBuffer = new Uint8Array(new ArrayBuffer(this.analyser.fftSize));
-    this.source.connect(this.analyser);
-
     // 出力は必ずゲイン0を経由させる。ノードは pull され続けるが、
     // マイク音がスピーカーへ回り込む（ハウリング）ことはない。
     this.silentGain = ctx.createGain();
     this.silentGain.gain.value = 0;
     this.silentGain.connect(ctx.destination);
+
+    this.analyser = ctx.createAnalyser();
+    this.analyser.fftSize = 2048;
+    this.levelBuffer = new Uint8Array(new ArrayBuffer(this.analyser.fftSize));
+    this.source.connect(this.analyser);
+    // アナライザーも destination までつないでおく。出力が繋がっていないノードは
+    // 実装によっては処理対象から外れ、レベルメーターが無音のままになる。
+    this.analyser.connect(this.silentGain);
 
     const engine = await this.attachCaptureNode(ctx);
 
@@ -185,16 +213,24 @@ export class AudioRecorder {
     await this.teardown();
   }
 
-  /** マイク入力の現在レベル 0..1。マイクテストのメーター用。 */
-  getInputLevel(): number {
-    if (!this.analyser || !this.levelBuffer) return 0;
+  /**
+   * マイク入力の現在レベル。マイクテストのメーター用。
+   * 瞬間の最大振幅（peak）と実効値（rms）を返す。rms の方が声の大きさに近い。
+   */
+  getInputMetrics(): MicMetrics | null {
+    if (!this.analyser || !this.levelBuffer) return null;
     this.analyser.getByteTimeDomainData(this.levelBuffer);
+
     let peak = 0;
+    let sumSquares = 0;
     for (let i = 0; i < this.levelBuffer.length; i++) {
-      const v = Math.abs(this.levelBuffer[i] - 128) / 128;
-      if (v > peak) peak = v;
+      const v = (this.levelBuffer[i] - 128) / 128;
+      const abs = Math.abs(v);
+      if (abs > peak) peak = abs;
+      sumSquares += v * v;
     }
-    return peak;
+
+    return { peak, rms: Math.sqrt(sumSquares / this.levelBuffer.length) };
   }
 
   isPrepared(): boolean {
@@ -203,21 +239,9 @@ export class AudioRecorder {
 
   // ---------------------------------------------------------------- internals
 
-  private async acquireStream(): Promise<MediaStream> {
-    // すべて ideal 指定にする。exact 相当の指定だと 48kHz 固定の端末で
-    // OverconstrainedError になり、フォールバックで音声処理OFFの指定ごと失われていた。
-    const constraints: MediaStreamConstraints = {
-      audio: {
-        channelCount: { ideal: 1 },
-        sampleRate: { ideal: 48000 },
-        echoCancellation: { ideal: false },
-        noiseSuppression: { ideal: false },
-        autoGainControl: { ideal: false },
-      },
-    };
-
+  private async awaitStream(streamPromise: Promise<MediaStream>): Promise<MediaStream> {
     try {
-      return await navigator.mediaDevices.getUserMedia(constraints);
+      return await streamPromise;
     } catch (e) {
       // 権限拒否・マイク不在などはそのまま呼び出し元へ返す（誤ったフォールバックをしない）
       const name = e instanceof Error ? e.name : "";

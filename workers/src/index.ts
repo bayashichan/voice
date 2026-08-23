@@ -355,13 +355,24 @@ async function handleReport(
     const errorName = (body.errorName || "UnknownError").slice(0, 60);
     const userName = sanitizeUserName(body.userName);
 
-    console.error("client failure:", { stage, errorName, userName, ua: body.userAgent });
+    console.error("client failure:", {
+        stage,
+        errorName,
+        userName,
+        url: body.url,
+        detail: body.detail,
+        ua: body.userAgent,
+    });
+
+    // どのサイト（本番/プレビュー/旧デプロイ）で起きたのかが分からないと
+    // 原因を追えないため、URLも通知に載せる。
+    const pageUrl = (body.url || "不明").slice(0, 300);
 
     ctx.waitUntil(
         notifyByEmail(env, {
             userName: `【録音失敗】${userName}（${errorName}）`,
-            fileName: `失敗箇所: ${stage} / ${(body.detail || "詳細なし").slice(0, 200)}`,
-            uploadedAt: `${new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}\n■ 環境: ${(body.userAgent || "").slice(0, 300)}`,
+            fileName: `失敗箇所: ${stage} / ${(body.detail || "詳細なし").slice(0, 400)}`,
+            uploadedAt: `${new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}\n■ ページ: ${pageUrl}\n■ 環境: ${(body.userAgent || "").slice(0, 300)}`,
         })
     );
 
