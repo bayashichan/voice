@@ -1,3 +1,24 @@
+# 声紋診断レコーダー
+
+## デプロイ構成
+
+| 役割 | 置き場所 | デプロイ方法 |
+| --- | --- | --- |
+| フロントエンド（本番） | Vercel: https://voice-rho-red.vercel.app | main への push で自動デプロイ |
+| 保存API | Cloudflare Workers: voice-recorder-api | `.github/workflows/deploy-worker.yml`（Actions から実行） |
+| 音声の保存先 | Cloudflare R2: voice-recordings | Worker 経由 |
+| 失敗・完了の通知 | Google Apps Script | Worker のシークレット `GAS_WEB_APP_URL` |
+
+**フロントエンドの本番は Vercel だけ**。以前あった Cloudflare Pages
+(voice-recorder-aba.pages.dev) は廃止した。配信元が2つあると、古い版が残っている方の
+URLを案内してしまい「直したはずの不具合が直っていない」という事故が起きる。
+公式LINEなどで配るURLは Vercel のものに統一すること。
+
+LINEのメッセージからリンクする場合は、末尾に `?openExternalBrowser=1` を付ける。
+LINEの内蔵ブラウザではマイクが使えず録音できないため、標準ブラウザで開かせる必要がある。
+
+---
+
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
 ## Getting Started
