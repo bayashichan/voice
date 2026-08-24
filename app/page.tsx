@@ -18,9 +18,10 @@ import {
   Download,
   RefreshCw,
 } from "lucide-react";
-import { AudioRecorder, AudioRecorderResult } from "@/utils/audioRecorder";
+import { AudioRecorder, AudioRecorderResult, MicMetrics } from "@/utils/audioRecorder";
 import { GlowCountdown } from "@/components/GlowCountdown";
 import { AudioVisualizer } from "@/components/AudioVisualizer";
+import { MicLevelMeter } from "@/components/MicLevelMeter";
 import { uploadRecording, reportFailure } from "@/utils/uploadRecording";
 import { cn } from "@/utils/cn";
 import {
@@ -32,6 +33,7 @@ import {
 import {
   detectEnvironment,
   getExternalBrowserGuide,
+  externalBrowserUrl,
   type EnvironmentInfo,
 } from "@/utils/environment";
 import { describeMicError, type MicErrorInfo } from "@/utils/micErrors";
@@ -57,6 +59,47 @@ function errorNameOf(e: unknown): string {
   return "UnknownError";
 }
 
+interface MicAttemptDiagnostics {
+  /** マイク要求から失敗までの経過ミリ秒。許可ダイアログが出たかの手がかり */
+  elapsedMs: number;
+  /** Permissions API から見た状態。非対応環境では "unsupported" */
+  permission: string;
+  /** iOS の本物のブラウザなら true。アプリ内蔵の WebView では false */
+  standalone: boolean;
+  /** 見えている音声入力デバイスの数。-1 は取得できなかったことを表す */
+  audioInputs: number;
+}
+
+/**
+ * 音声入力デバイスの数を数える。
+ * 端末側でマイクが禁止されている（スクリーンタイムの制限など）と
+ * 0 件になることがあり、「許可画面が出ないまま失敗する」ケースの手がかりになる。
+ * ブラウザによって権限取得前の挙動が違うため、判定には使わず記録だけする。
+ */
+async function countAudioInputs(): Promise<number> {
+  try {
+    if (!navigator.mediaDevices?.enumerateDevices) return -1;
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.filter((d) => d.kind === "audioinput").length;
+  } catch {
+    return -1;
+  }
+}
+
+/** マイク権限の状態。Safari では未対応のこともあるので必ず握りつぶす */
+async function readMicPermissionState(): Promise<string> {
+  try {
+    const permissions = navigator.permissions;
+    if (!permissions?.query) return "unsupported";
+    const status = await permissions.query({
+      name: "microphone" as PermissionName,
+    });
+    return status.state;
+  } catch {
+    return "unsupported";
+  }
+}
+
 function newUploadId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -64,14 +107,92 @@ function newUploadId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+
+/**
+ * 全画面ステップの外枠。
+ *
+ * 以前は Home コンポーネントの内側で定義していたため、state が変わるたびに
+ * 「別のコンポーネント型」と見なされて中身が丸ごと作り直されていた。
+ * その結果、入場アニメーションが毎回やり直しになり、マイクテストの
+ * メーターが伸びずにちらつくだけになっていた。
+ */
+function FullScreenWrapper({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="fixed inset-0 z-50 bg-gray-950 flex flex-col items-center justify-center p-4 md:p-8 animate-fade-in overflow-y-auto">
+      <div className="absolute inset-0 pointer-events-none overflow-hidden">
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[400px] md:w-[600px] h-[400px] md:h-[600px] bg-blue-900/10 rounded-full blur-[100px] md:blur-[120px]" />
+      </div>
+      <div className="z-10 w-full max-w-lg flex flex-col items-center text-center my-auto">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function ConfirmButton({
+  onClick,
+  text = "確認しました",
+}: {
+  onClick: () => void;
+  text?: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="w-full max-w-sm py-4 md:py-5 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-xl md:rounded-2xl font-bold text-lg md:text-xl hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-blue-900/30 hover:shadow-blue-900/50"
+    >
+      {text}
+      <ArrowRight className="w-5 h-5 md:w-6 md:h-6" />
+    </button>
+  );
+}
+
+function CopyUrlButton({ copied, onCopy }: { copied: boolean; onCopy: () => void }) {
+  return (
+    <button
+      onClick={onCopy}
+      className="w-full max-w-sm py-3 bg-gray-800 rounded-xl font-medium text-base text-gray-200 hover:bg-gray-700 transition-colors flex items-center justify-center gap-2"
+    >
+      {copied ? (
+        <>
+          <Check className="w-5 h-5 text-green-400" />
+          コピーしました
+        </>
+      ) : (
+        <>
+          <Copy className="w-5 h-5" />
+          このページのURLをコピー
+        </>
+      )}
+    </button>
+  );
+}
+
+/**
+ * LINEの内蔵ブラウザから標準ブラウザへ抜けるためのボタン。
+ * openExternalBrowser=1 を付けたURLへ遷移するとLINEが外部ブラウザで開き直す。
+ */
+function ExternalBrowserButton() {
+  return (
+    <a
+      href={externalBrowserUrl()}
+      className="w-full max-w-sm py-4 bg-gradient-to-r from-cyan-600 to-blue-600 rounded-xl font-bold text-base md:text-lg text-white hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-cyan-900/30"
+    >
+      <ExternalLink className="w-5 h-5" />
+      外部ブラウザで開き直す
+    </a>
+  );
+}
+
 export default function Home() {
   const [appState, setAppState] = useState<AppState>("intro");
   const [env, setEnv] = useState<EnvironmentInfo | null>(null);
   const [failure, setFailure] = useState<MicErrorInfo | null>(null);
+  /** 問い合わせのときにスクリーンショットで送ってもらう診断文字列 */
+  const [diagnostic, setDiagnostic] = useState<string>("");
   const [userName, setUserName] = useState<string>("");
 
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
-  const [micLevel, setMicLevel] = useState<number>(0);
 
   const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
   const [recordedDuration, setRecordedDuration] = useState<number>(0);
@@ -115,7 +236,6 @@ export default function Home() {
     const recorder = recorderRef.current;
     recorderRef.current = null;
     setAnalyser(null);
-    setMicLevel(0);
     if (recorder) void recorder.dispose().catch(() => undefined);
   }, []);
 
@@ -145,6 +265,7 @@ export default function Home() {
       releaseWakeLock();
       disposeRecorder();
       setFailure(info);
+      setDiagnostic(detail ?? "");
       setAppState("error");
       reportFailure({ stage, errorName: info.code, userName, detail });
     },
@@ -152,29 +273,66 @@ export default function Home() {
   );
 
   const failFromException = useCallback(
-    (e: unknown, stage: string) => {
+    (e: unknown, stage: string, diag?: MicAttemptDiagnostics) => {
       const info = describeMicError(e, device);
       const inApp = env?.inAppBrowser ?? null;
-
-      // アプリ内ブラウザでの拒否は設定を直しても解決しないので外部ブラウザへ誘導する
-      if (inApp && (info.code === "NotAllowedError" || info.code === "Unsupported")) {
-        const guide = getExternalBrowserGuide(inApp, device);
-        fail(
-          {
-            code: info.code,
-            title: guide.title,
-            message:
-              "アプリ内ブラウザではマイクを使用できません。下の手順で Safari または Chrome で開き直してください。",
-            hints: guide.steps,
-            action: "externalBrowser",
-          },
-          stage,
-          `inAppBrowser=${inApp}`
+      const detailParts = [e instanceof Error ? e.message : String(e)];
+      if (diag) {
+        detailParts.push(
+          `elapsed=${diag.elapsedMs}ms`,
+          `permission=${diag.permission}`,
+          `inApp=${inApp ?? "none"}`,
+          `likelyInApp=${env?.likelyInAppBrowser ?? false}`,
+          `standalone=${diag.standalone}`,
+          `audioInputs=${diag.audioInputs}`
         );
-        return;
+      }
+      const detail = detailParts.join(" / ");
+
+      if (info.code === "NotAllowedError" || info.code === "Unsupported") {
+        // 許可ダイアログが出ていれば、人がタップするまでに必ず時間がかかる。
+        // 一瞬で拒否されたということは、ダイアログすら出ていない＝
+        // アプリ内ブラウザなどブラウザ側の制限で塞がれている可能性が高い。
+        const deniedBySetting = diag?.permission === "denied";
+        const blockedByPlatform =
+          !!inApp ||
+          env?.likelyInAppBrowser === true ||
+          (!deniedBySetting && diag !== undefined && diag.elapsedMs < 1200);
+
+        if (blockedByPlatform) {
+          const guide = getExternalBrowserGuide(inApp, device);
+          // 原因は「アプリ内ブラウザ」と「端末側でマイクが禁止されている」の
+          // 2通りある。どちらかを断定できないので、両方の手順を順番に出す。
+          const deviceLevelHints =
+            device === "ios"
+              ? [
+                "― Safariで開いているのにこの表示が出る場合 ―",
+                "設定 → スクリーンタイム → コンテンツとプライバシーの制限 → マイク →「許可」",
+                "設定 → Safari → マイク →「確認」",
+                "上を直したら、Safariのタブを一度閉じてから開き直してください",
+              ]
+              : [
+                "― ブラウザで直接開いているのにこの表示が出る場合 ―",
+                "アドレスバーの🔒からマイクを「許可」に変更してください",
+              ];
+
+          fail(
+            {
+              code: info.code,
+              title: "マイクの許可画面が出ませんでした",
+              message:
+                "許可を尋ねられないまま録音がブロックされました。LINEなどのアプリ内ブラウザで開いている場合と、端末側でマイクが禁止されている場合があります。",
+              hints: [...guide.steps, ...deviceLevelHints],
+              action: "externalBrowser",
+            },
+            stage,
+            detail
+          );
+          return;
+        }
       }
 
-      fail(info, stage, e instanceof Error ? e.message : undefined);
+      fail(info, stage, detail);
     },
     [device, env, fail]
   );
@@ -205,6 +363,7 @@ export default function Home() {
     disposeRecorder();
     const recorder = new AudioRecorder();
     recorderRef.current = recorder;
+    const startedAt = Date.now();
 
     try {
       const prepared = await recorder.prepare();
@@ -213,26 +372,25 @@ export default function Home() {
       void requestWakeLock();
     } catch (e) {
       console.error("マイクの準備に失敗:", e);
-      failFromException(e, "マイク準備");
+      // 失敗の理由を切り分けるための材料を集める。
+      // 許可ダイアログが出たかどうかは経過時間で推し量る。
+      const diag: MicAttemptDiagnostics = {
+        elapsedMs: Date.now() - startedAt,
+        permission: await readMicPermissionState(),
+        standalone: typeof navigator !== "undefined" && "standalone" in navigator,
+        audioInputs: await countAudioInputs(),
+      };
+      failFromException(e, "マイク準備", diag);
     }
   };
 
-  // マイクテスト中のレベルメーター
-  useEffect(() => {
-    if (appState !== "micReady") return;
-    let raf = 0;
-    let last = 0;
-
-    const tick = (now: number) => {
-      raf = requestAnimationFrame(tick);
-      if (now - last < 80) return;
-      last = now;
-      setMicLevel(recorderRef.current?.getInputLevel() ?? 0);
-    };
-
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [appState]);
+  // マイクテスト中のレベルメーター。
+  // 値の取得だけをここで提供し、描画は MicLevelMeter が requestAnimationFrame で行う。
+  // 以前は 80ms ごとに setState していたため、画面全体が再描画され続けていた。
+  const getMicMetrics = useCallback(
+    (): MicMetrics | null => recorderRef.current?.getInputMetrics() ?? null,
+    []
+  );
 
   // ---------------------------------------------------------------- 録音
 
@@ -508,6 +666,7 @@ export default function Home() {
     disposeRecorder();
     stoppingRef.current = false;
     setFailure(null);
+    setDiagnostic("");
     setRecordedBlob(null);
     setRecordedDuration(0);
     setUploadProgress(0);
@@ -521,6 +680,7 @@ export default function Home() {
     disposeRecorder();
     stoppingRef.current = false;
     setFailure(null);
+    setDiagnostic("");
     setRecordedBlob(null);
     setRecordedDuration(0);
     setUploadProgress(0);
@@ -570,58 +730,6 @@ export default function Home() {
       ],
     };
   }, [device]);
-
-  const FullScreenWrapper = ({ children }: { children: React.ReactNode }) => (
-    <div className="fixed inset-0 z-50 bg-gray-950 flex flex-col items-center justify-center p-4 md:p-8 animate-[fadeIn_0.8s_ease-out] overflow-y-auto">
-      <style jsx>{`
-        @keyframes fadeIn {
-          from { opacity: 0; transform: translateY(20px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-      `}</style>
-      <div className="absolute inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[400px] md:w-[600px] h-[400px] md:h-[600px] bg-blue-900/10 rounded-full blur-[100px] md:blur-[120px]" />
-      </div>
-      <div className="z-10 w-full max-w-lg flex flex-col items-center text-center my-auto">
-        {children}
-      </div>
-    </div>
-  );
-
-  const ConfirmButton = ({
-    onClick,
-    text = "確認しました",
-  }: {
-    onClick: () => void;
-    text?: string;
-  }) => (
-    <button
-      onClick={onClick}
-      className="w-full max-w-sm py-4 md:py-5 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-xl md:rounded-2xl font-bold text-lg md:text-xl hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-blue-900/30 hover:shadow-blue-900/50"
-    >
-      {text}
-      <ArrowRight className="w-5 h-5 md:w-6 md:h-6" />
-    </button>
-  );
-
-  const CopyUrlButton = () => (
-    <button
-      onClick={copyPageUrl}
-      className="w-full max-w-sm py-3 bg-gray-800 rounded-xl font-medium text-base text-gray-200 hover:bg-gray-700 transition-colors flex items-center justify-center gap-2"
-    >
-      {copied ? (
-        <>
-          <Check className="w-5 h-5 text-green-400" />
-          コピーしました
-        </>
-      ) : (
-        <>
-          <Copy className="w-5 h-5" />
-          このページのURLをコピー
-        </>
-      )}
-    </button>
-  );
 
   const DownloadAndShare = ({ tone }: { tone: "blue" | "red" }) => (
     <div className="w-full max-w-sm space-y-3">
@@ -684,7 +792,8 @@ export default function Home() {
               安全な接続（https）で開く必要があります。
             </p>
           )}
-          <CopyUrlButton />
+          {env.isSecure && <ExternalBrowserButton />}
+          <CopyUrlButton copied={copied} onCopy={copyPageUrl} />
         </div>
       </main>
     );
@@ -709,8 +818,9 @@ export default function Home() {
             <span className="text-white font-medium">高品質な音声録音</span>を行います
           </p>
 
-          {/* アプリ内ブラウザは録音に失敗しやすいので先に警告する */}
-          {env?.inAppBrowser && (
+          {/* アプリ内ブラウザは録音に失敗しやすいので先に警告する。
+              UAにアプリ名が出ない内蔵ブラウザ（LINEのiOS版など）も拾う */}
+          {(env?.inAppBrowser || env?.likelyInAppBrowser) && (
             <div className="w-full max-w-sm bg-yellow-900/30 border border-yellow-700/50 rounded-xl p-4 mb-6 text-left space-y-3">
               <p className="text-sm text-yellow-300 font-medium flex items-start gap-2">
                 <ExternalLink className="w-5 h-5 flex-shrink-0 mt-0.5" />
@@ -723,7 +833,8 @@ export default function Home() {
                   </p>
                 ))}
               </div>
-              <CopyUrlButton />
+              <ExternalBrowserButton />
+              <CopyUrlButton copied={copied} onCopy={copyPageUrl} />
             </div>
           )}
 
@@ -944,25 +1055,9 @@ export default function Home() {
             「あー」と声を出して、下のバーが動くことを確認してください
           </p>
 
-          <div className="w-full max-w-sm mb-2">
-            <div className="w-full h-6 bg-gray-800 rounded-full overflow-hidden border border-gray-700">
-              <div
-                className={cn(
-                  "h-full transition-[width] duration-75",
-                  micLevel > 0.05 ? "bg-green-500" : "bg-gray-600"
-                )}
-                style={{ width: `${Math.min(100, Math.round(micLevel * 140))}%` }}
-              />
-            </div>
+          <div className="w-full flex justify-center mb-6">
+            <MicLevelMeter getMetrics={getMicMetrics} active={appState === "micReady"} />
           </div>
-          <p
-            className={cn(
-              "text-sm mb-8 h-5",
-              micLevel > 0.05 ? "text-green-400" : "text-gray-500"
-            )}
-          >
-            {micLevel > 0.05 ? "音を検出しています" : "声を出すとバーが伸びます"}
-          </p>
 
           <button
             onClick={() => setAppState("countdown")}
@@ -1006,15 +1101,9 @@ export default function Home() {
               <div
                 className="h-full bg-cyan-500"
                 style={{
-                  animation: `progress ${RECORDING_DURATION_SEC}s linear forwards`,
+                  animation: `recordingProgress ${RECORDING_DURATION_SEC}s linear forwards`,
                 }}
               />
-              <style jsx>{`
-                @keyframes progress {
-                  from { width: 0%; }
-                  to { width: 100%; }
-                }
-              `}</style>
             </div>
             <p className="text-xs text-yellow-400/80">
               他のアプリに切り替えないでください
@@ -1144,7 +1233,12 @@ export default function Home() {
               </div>
             )}
 
-            {failure?.action === "externalBrowser" && <CopyUrlButton />}
+            {failure?.action === "externalBrowser" && (
+              <div className="w-full max-w-sm space-y-3">
+                <ExternalBrowserButton />
+                <CopyUrlButton copied={copied} onCopy={copyPageUrl} />
+              </div>
+            )}
 
             {/* 録音が取れている場合のみ、手元に保存する手段を出す */}
             {recordedBlob && recordedDuration >= 3 && (
@@ -1173,9 +1267,21 @@ export default function Home() {
             </button>
 
             {failure?.code && (
-              <p className="text-[10px] text-gray-600">
-                エラーコード: {failure.code}
-              </p>
+              <div className="w-full max-w-sm text-center space-y-1">
+                <p className="text-[10px] text-gray-600">
+                  エラーコード: {failure.code}
+                </p>
+                {diagnostic && (
+                  <>
+                    <p className="text-[10px] text-gray-600">
+                      解決しない場合は、この画面のスクリーンショットをお送りください
+                    </p>
+                    <p className="text-[10px] text-gray-700 break-all select-all">
+                      {diagnostic}
+                    </p>
+                  </>
+                )}
+              </div>
             )}
           </div>
         )}

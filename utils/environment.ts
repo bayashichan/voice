@@ -6,6 +6,12 @@ export interface EnvironmentInfo {
     device: DeviceType;
     /** アプリ内ブラウザ（WebView）で開かれている場合はその種別 */
     inAppBrowser: InAppBrowser;
+    /**
+     * UAにアプリ名が出ない内蔵ブラウザも含めた推定。
+     * LINEなど一部のアプリはUAをSafariとほぼ同じに見せるため、
+     * UA判定だけでは取りこぼす。
+     */
+    likelyInAppBrowser: boolean;
     /** getUserMedia が実際に呼べる環境かどうか（UAではなく機能で判定） */
     canRecord: boolean;
     /** https（またはlocalhost）で開かれているか */
@@ -32,9 +38,36 @@ function detectInAppBrowser(rawUa: string): InAppBrowser {
     return null;
 }
 
+/**
+ * UAを詐称する内蔵ブラウザ（WKWebView）を機能で見分ける。
+ *
+ * iOS の本物の Safari とホーム画面追加アプリでは navigator.standalone が
+ * 必ず定義されているが、アプリ内蔵の WKWebView では未定義になる。
+ * 実際の失敗報告では UA が素の Safari と区別できず（"Line/" を含まない）、
+ * UA判定だけでは内蔵ブラウザだと分からなかった。
+ */
+function detectLikelyInAppBrowser(
+    rawUa: string,
+    device: DeviceType,
+    inApp: InAppBrowser
+): boolean {
+    if (inApp) return true;
+    if (device !== "ios") return false;
+    // iOS版のChrome / Firefox / Edge などは中身がWKWebViewでも本物のブラウザで、
+    // マイクも使える。standalone が無いことを理由に警告してはいけない。
+    if (/CriOS|FxiOS|EdgiOS|OPiOS|Coast/i.test(rawUa)) return false;
+    return !("standalone" in navigator);
+}
+
 export function detectEnvironment(): EnvironmentInfo {
     if (typeof navigator === "undefined" || typeof window === "undefined") {
-        return { device: "pc", inAppBrowser: null, canRecord: true, isSecure: true };
+        return {
+            device: "pc",
+            inAppBrowser: null,
+            likelyInAppBrowser: false,
+            canRecord: true,
+            isSecure: true,
+        };
     }
 
     const rawUa = navigator.userAgent;
@@ -44,12 +77,32 @@ export function detectEnvironment(): EnvironmentInfo {
     const canRecord =
         isSecure && typeof navigator.mediaDevices?.getUserMedia === "function";
 
+    const device = detectDevice(ua);
+    const inAppBrowser = detectInAppBrowser(rawUa);
+
     return {
-        device: detectDevice(ua),
-        inAppBrowser: detectInAppBrowser(rawUa),
+        device,
+        inAppBrowser,
+        likelyInAppBrowser: detectLikelyInAppBrowser(rawUa, device, inAppBrowser),
         canRecord,
         isSecure,
     };
+}
+
+/**
+ * LINE の内蔵ブラウザは openExternalBrowser=1 が付いたURLを
+ * 端末の標準ブラウザ（iOSならSafari）で開き直す。LINE以外のアプリでは
+ * 単に無視されるので、そのまま付けて問題ない。
+ */
+export function externalBrowserUrl(): string {
+    if (typeof location === "undefined") return "";
+    try {
+        const url = new URL(location.href);
+        url.searchParams.set("openExternalBrowser", "1");
+        return url.toString();
+    } catch {
+        return location.href;
+    }
 }
 
 /** アプリ内ブラウザから標準ブラウザへ移ってもらうための案内文 */
@@ -61,10 +114,24 @@ export function getExternalBrowserGuide(
         return {
             title: "LINEのブラウザでは録音できません",
             steps: [
-                "画面右下の「…」（メニュー）をタップ",
+                "下の「外部ブラウザで開き直す」ボタンをタップ",
+                "開かない場合は画面右下の「…」（メニュー）をタップ",
                 device === "ios"
                     ? "「Safariで開く」を選択"
                     : "「他のアプリで開く」→ Chrome を選択",
+                "開いたブラウザでもう一度この画面を表示してください",
+            ],
+        };
+    }
+
+    if (inAppBrowser === null) {
+        return {
+            title: "アプリ内ブラウザでは録音できません",
+            steps: [
+                "下の「外部ブラウザで開き直す」ボタンをタップ",
+                device === "ios"
+                    ? "開かない場合は、画面のメニューから「Safariで開く」を選択"
+                    : "開かない場合は、画面のメニューから「ブラウザで開く」を選択",
                 "開いたブラウザでもう一度この画面を表示してください",
             ],
         };
