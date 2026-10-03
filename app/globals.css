@@ -44,9 +44,3 @@ body {
 .animate-fade-in {
   animation: fadeIn 0.8s ease-out;
 }
-
-/* 録音中のプログレスバー（同じ理由でCSS側に移した） */
-@keyframes recordingProgress {
-  from { width: 0%; }
-  to   { width: 100%; }
-}

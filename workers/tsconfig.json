@@ -7,7 +7,7 @@
             "ES2021"
         ],
         "types": [
-            "@cloudflare/workers-types"
+            "@cloudflare/workers-types/2023-07-01"
         ],
         "strict": true,
         "esModuleInterop": true,
