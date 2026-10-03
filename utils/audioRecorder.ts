@@ -1,3 +1,9 @@
+import {
+  captureSamplesFor,
+  minCaptureSamplesFor,
+  toVoiceScanWav,
+} from "./voicescanFormat";
+
 export interface MicMetrics {
   /** 直近フレームの最大振幅 0..1 */
   peak: number;
@@ -13,14 +19,38 @@ export interface PreparedRecorder {
 }
 
 export interface AudioRecorderResult {
+  /** VoiceScan がそのまま解析できる WAV（22050Hz/16bit/モノラル・正規化済み） */
   blob: Blob;
   /** 実際に収録できた秒数（壁時計ではなくサンプル数から算出） */
   duration: number;
   /** 収録区間の最大振幅 0..1。無音判定に使う */
   peak: number;
+  /** フルスケール付近（音割れ）のサンプルの割合 0..1 */
+  clipRatio: number;
+  /** 声と背景雑音の差の推定値（dB）。30msごとの音量の上位5%と下位10%の差 */
+  snrDb: number;
   sampleCount: number;
+  /** VoiceScan の解析範囲（先頭約11.9秒）をすべて実音声で埋められたか */
+  enoughForAnalysis: boolean;
   /** 収録中にAudioContextが中断（着信・バックグラウンド等）されたか */
   interrupted: boolean;
+  /** 取り込み時のサンプリングレート（変換前） */
+  captureRate: number;
+}
+
+export interface CaptureProgress {
+  /** 0..1 */
+  ratio: number;
+  /** 最後に音声データが届いた時刻（performance.now()）。まだ届いていなければ 0 */
+  lastDataAt: number;
+}
+
+/** マイクに実際に適用された設定（ブラウザが制約を無視することがあるので記録する） */
+export interface TrackInfo {
+  sampleRate: number | null;
+  echoCancellation: boolean | null;
+  noiseSuppression: boolean | null;
+  autoGainControl: boolean | null;
 }
 
 type AudioContextCtor = typeof AudioContext;
@@ -55,6 +85,9 @@ const PRIMARY_CONSTRAINTS: MediaStreamConstraints = {
  * ユーザー操作（タップ）のハンドラ内で同期的に始まる prepare() で行う。
  * カウントダウンを挟んでから beginCapture() で蓄積を開始するため、
  * getUserMedia は 1 回しか呼ばれず、マイクの取り直しも発生しない。
+ *
+ * 取り込みは端末のサンプリングレートのまま行い、stop() で VoiceScan の録音と
+ * 同じ形式（22050Hz/16bit/モノラル・ピーク正規化・12秒設定の長さ）に変換する。
  */
 export class AudioRecorder {
   private audioContext: AudioContext | null = null;
@@ -75,6 +108,8 @@ export class AudioRecorder {
   private targetSamples = Number.POSITIVE_INFINITY;
   private onTargetReached: (() => void) | null = null;
   private targetFired = false;
+  private lastDataAt = 0;
+  private trackInfo: TrackInfo | null = null;
 
   private levelBuffer: Uint8Array<ArrayBuffer> | null = null;
 
@@ -118,6 +153,7 @@ export class AudioRecorder {
     };
 
     this.mediaStream = await this.awaitStream(streamPromise);
+    this.trackInfo = this.readTrackInfo(this.mediaStream);
 
     // resume が保留になっていた場合に備えてもう一度確認する
     if (ctx.state !== "running") {
@@ -154,9 +190,9 @@ export class AudioRecorder {
 
   /**
    * 蓄積を開始する。新たな権限要求は発生しないのでカウントダウン後に呼んでよい。
-   * targetDurationSec に達したら onTargetReached が一度だけ呼ばれる。
+   * VoiceScan の 12 秒設定と同じ長さ（約13.1秒）を取り込んだら onTargetReached が一度だけ呼ばれる。
    */
-  beginCapture(targetDurationSec?: number, onTargetReached?: () => void): void {
+  beginCapture(onTargetReached?: () => void): void {
     if (!this.prepared) {
       throw new Error("prepare() が完了していません");
     }
@@ -165,11 +201,9 @@ export class AudioRecorder {
     this.recordingLength = 0;
     this.interrupted = false;
     this.targetFired = false;
+    this.lastDataAt = 0;
     this.onTargetReached = onTargetReached ?? null;
-    this.targetSamples =
-      targetDurationSec && targetDurationSec > 0
-        ? Math.ceil(targetDurationSec * this.sampleRate)
-        : Number.POSITIVE_INFINITY;
+    this.targetSamples = captureSamplesFor(this.sampleRate);
 
     const ctx = this.audioContext;
     if (ctx && ctx.state !== "running") {
@@ -182,26 +216,47 @@ export class AudioRecorder {
     this.workletNode?.port.postMessage({ type: "start" });
   }
 
-  /** 収録を止めて WAV を組み立てる。マイクと AudioContext も解放する。 */
+  /** 録音の進み具合。プログレスバーと「音声が止まった」検知に使う */
+  getCaptureProgress(): CaptureProgress {
+    const ratio =
+      Number.isFinite(this.targetSamples) && this.targetSamples > 0
+        ? Math.min(1, this.recordingLength / this.targetSamples)
+        : 0;
+    return { ratio, lastDataAt: this.lastDataAt };
+  }
+
+  getTrackInfo(): TrackInfo | null {
+    return this.trackInfo;
+  }
+
+  /** 収録を止めて VoiceScan 形式の WAV を組み立てる。マイクと AudioContext も解放する。 */
   async stop(): Promise<AudioRecorderResult> {
     this.capturing = false;
     this.workletNode?.port.postMessage({ type: "stop" });
 
     const samples = this.mergeBuffers(this.chunks, this.recordingLength);
+    this.chunks = [];
     const sampleRate = this.sampleRate;
     const interrupted = this.interrupted;
 
     await this.teardown();
 
-    const peak = this.calcPeak(samples);
-    const blob = this.encodeWAV(samples, sampleRate);
+    const { peak, clipRatio } = this.measureLevel(samples);
+    const snrDb = this.estimateSnrDb(samples, sampleRate);
+    // 22050Hz への変換は低速な端末で数百ミリ秒かかる。先に「保存中」の画面を描かせる
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    const wav = toVoiceScanWav(samples, sampleRate);
 
     return {
-      blob,
+      blob: new Blob([wav], { type: "audio/wav" }),
       duration: samples.length / sampleRate,
       peak,
+      clipRatio,
+      snrDb,
       sampleCount: samples.length,
+      enoughForAnalysis: samples.length >= minCaptureSamplesFor(sampleRate),
       interrupted,
+      captureRate: sampleRate,
     };
   }
 
@@ -249,7 +304,15 @@ export class AudioRecorder {
         throw e;
       }
       console.warn("詳細制約でのgetUserMedia失敗。シンプル設定で再試行します。", e);
-      return await navigator.mediaDevices.getUserMedia({ audio: true });
+      // 音声処理OFFだけは保つ。ノイズ除去や自動音量がかかると周波数成分が変わり、
+      // VoiceScan の解析結果がずれる
+      try {
+        return await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        });
+      } catch {
+        return await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
     }
   }
 
@@ -290,6 +353,7 @@ export class AudioRecorder {
   }
 
   private pushChunk(chunk: Float32Array) {
+    this.lastDataAt = performance.now();
     if (this.recordingLength >= this.targetSamples) return;
 
     this.chunks.push(chunk);
@@ -340,13 +404,51 @@ export class AudioRecorder {
     this.prepared = false;
   }
 
-  private calcPeak(samples: Float32Array): number {
+  /** 最大振幅と、フルスケール付近（音割れ）のサンプルの割合 */
+  private measureLevel(samples: Float32Array): { peak: number; clipRatio: number } {
     let peak = 0;
+    let clipped = 0;
     for (let i = 0; i < samples.length; i++) {
       const v = Math.abs(samples[i]);
       if (v > peak) peak = v;
+      if (v >= 0.99) clipped++;
     }
-    return peak;
+    return { peak, clipRatio: samples.length > 0 ? clipped / samples.length : 0 };
+  }
+
+  /**
+   * 声と背景雑音の差（dB）を推定する。名前を繰り返す合間の息継ぎが雑音側になる。
+   * 30ms ごとの音量（dB）の 95 パーセンタイルを声、10 パーセンタイルを雑音とみなす。
+   */
+  private estimateSnrDb(samples: Float32Array, sampleRate: number): number {
+    const frame = Math.max(1, Math.round(sampleRate * 0.03));
+    const levels: number[] = [];
+    for (let i = 0; i + frame <= samples.length; i += frame) {
+      let sum = 0;
+      for (let j = i; j < i + frame; j++) sum += samples[j] * samples[j];
+      levels.push(10 * Math.log10(sum / frame + 1e-12));
+    }
+    if (levels.length < 10) return 0;
+    levels.sort((a, b) => a - b);
+    const at = (p: number) => levels[Math.floor(p * (levels.length - 1))];
+    return at(0.95) - at(0.1);
+  }
+
+  private readTrackInfo(stream: MediaStream): TrackInfo | null {
+    try {
+      const track = stream.getAudioTracks()[0];
+      const s = track?.getSettings ? track.getSettings() : null;
+      if (!s) return null;
+      const flag = (v: unknown) => (typeof v === "boolean" ? v : null);
+      return {
+        sampleRate: typeof s.sampleRate === "number" ? s.sampleRate : null,
+        echoCancellation: flag(s.echoCancellation),
+        noiseSuppression: flag(s.noiseSuppression),
+        autoGainControl: flag(s.autoGainControl),
+      };
+    } catch {
+      return null;
+    }
   }
 
   private mergeBuffers(chunks: Float32Array[], recordingLength: number): Float32Array {
@@ -364,48 +466,5 @@ export class AudioRecorder {
       }
     }
     return result;
-  }
-
-  private encodeWAV(samples: Float32Array, sampleRate: number): Blob {
-    const numChannels = 1; // モノラル
-    const bitsPerSample = 16;
-    const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
-    const blockAlign = numChannels * (bitsPerSample / 8);
-    const dataSize = samples.length * (bitsPerSample / 8);
-
-    const buffer = new ArrayBuffer(44 + dataSize);
-    const view = new DataView(buffer);
-
-    // WAVヘッダー
-    this.writeString(view, 0, "RIFF");
-    view.setUint32(4, 36 + dataSize, true);           // ファイルサイズ - 8
-    this.writeString(view, 8, "WAVE");
-    this.writeString(view, 12, "fmt ");
-    view.setUint32(16, 16, true);                     // fmtチャンクサイズ
-    view.setUint16(20, 1, true);                      // PCMフォーマット
-    view.setUint16(22, numChannels, true);            // チャンネル数(1=モノラル)
-    view.setUint32(24, sampleRate, true);             // サンプルレート
-    view.setUint32(28, byteRate, true);               // バイトレート
-    view.setUint16(32, blockAlign, true);             // ブロックアライン
-    view.setUint16(34, bitsPerSample, true);          // ビット深度
-    this.writeString(view, 36, "data");
-    view.setUint32(40, dataSize, true);               // データサイズ
-
-    this.floatTo16BitPCM(view, 44, samples);
-
-    return new Blob([view], { type: "audio/wav" });
-  }
-
-  private floatTo16BitPCM(output: DataView, offset: number, input: Float32Array) {
-    for (let i = 0; i < input.length; i++, offset += 2) {
-      const s = Math.max(-1, Math.min(1, input[i]));
-      output.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-    }
-  }
-
-  private writeString(view: DataView, offset: number, string: string) {
-    for (let i = 0; i < string.length; i++) {
-      view.setUint8(offset + i, string.charCodeAt(i));
-    }
   }
 }

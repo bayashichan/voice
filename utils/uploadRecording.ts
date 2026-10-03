@@ -5,6 +5,12 @@ export interface UploadRecordingOptions {
     userName: string;
     /** リトライしても同じファイルとして扱われるようにするための識別子 */
     uploadId: string;
+    /**
+     * 録音の付帯情報（形式・端末のサンプリングレート・音声処理の状態など）。
+     * Worker が保存ファイルのメタデータとして残し、VoiceScan の一覧に表示する。
+     * 旧 Worker は無視するだけなので互換性に影響しない。
+     */
+    meta?: Record<string, string>;
     /** 0..1 のアップロード進捗 */
     onProgress?: (ratio: number) => void;
     /** リトライ待機に入るたびに呼ばれる（1 始まり） */
@@ -106,7 +112,7 @@ async function sendOnce(
     options: UploadRecordingOptions,
     mode: UploadMode
 ): Promise<UploadRecordingResult> {
-    const { blob, userName, uploadId, onProgress } = options;
+    const { blob, userName, uploadId, meta, onProgress } = options;
 
     let body: Blob | string;
     let contentType: string;
@@ -125,10 +131,9 @@ async function sendOnce(
     }
 
     return new Promise<UploadRecordingResult>((resolve, reject) => {
-        const url =
-            `${WORKERS_API_URL}/upload` +
-            `?name=${encodeURIComponent(userName)}` +
-            `&id=${encodeURIComponent(uploadId)}`;
+        const params = new URLSearchParams({ name: userName, id: uploadId });
+        for (const [key, value] of Object.entries(meta ?? {})) params.set(key, value);
+        const url = `${WORKERS_API_URL}/upload?${params.toString()}`;
 
         const xhr = new XMLHttpRequest();
         xhr.open("POST", url, true);

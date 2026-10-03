@@ -17,6 +17,29 @@ URLを案内してしまい「直したはずの不具合が直っていない�
 LINEのメッセージからリンクする場合は、末尾に `?openExternalBrowser=1` を付ける。
 LINEの内蔵ブラウザではマイクが使えず録音できないため、標準ブラウザで開かせる必要がある。
 
+## 録音データの形式（VoiceScan でそのまま解析できる形）
+
+録音は VoiceScan（声分析ソフト）の録音と同じ形式で保存する（`utils/voicescanFormat.ts`）。
+
+- 22050Hz / 16bit / モノラル、ピークを 32767 に正規化（VoiceScan の Normalize16 と同じ）
+- 長さは VoiceScan の録音時間「12秒」設定と同じ 289380 サンプル（約13.1秒、ファイル 578,804 バイト）。
+  VoiceScan はファイルサイズから解析設定を決めるので、この長さだと 12 秒設定（先頭約11.9秒を解析）で開かれる
+- 端末のサンプリングレートで取り込み、VoiceScanWeb2 の `js/recorder.js`（`MicRecorder.toWav`）と同じ処理で変換する。
+  同じ入力ならバイト単位で同じ WAV になる。どちらかを変えたら両方そろえること
+- 録音後に「音割れ率 0.1% 以上」「推定SN比 25dB 未満」なら録り直しを勧める（送信も可）。
+  音量そのものは正規化で揃うため結果にほぼ影響しない（根拠: VoiceScan 側 `検証ツール/実録音比較/level.js`）
+- 取り込み時の情報（取り込みレート・音声処理の有無・音割れ率・SN比など）をアップロードのクエリで送り、
+  Worker が R2 のメタデータに保存する。VoiceScan Web の「録音サイトから開く」の一覧に品質として表示される
+
+VoiceScan Web からは管理API（`/list`・`/download`・`/delete`、パスワードは `ADMIN_PASSWORD`）で直接開ける。
+
+## ローカルでの動作確認（本番に送らない）
+
+```bash
+cd workers && npx wrangler dev --port 8787   # R2 はローカルの模擬。workers/.dev.vars に ADMIN_PASSWORD を書く
+NEXT_PUBLIC_WORKERS_API_URL=http://127.0.0.1:8787 npm run dev
+```
+
 ---
 
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).

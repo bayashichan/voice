@@ -18,6 +18,16 @@ const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 /** アップロードIDと保存済みファイル名の対応を置くプレフィックス（一覧からは隠す） */
 const ID_INDEX_PREFIX = "_ids/";
 
+/**
+ * 録音の付帯情報としてクエリから受け取るキー（録音ページの buildUploadMeta）。
+ * fmt=保存形式 / srate=取り込みレート / mic=マイクのレート / proc=音声処理の状態 /
+ * peak・clip・snr=音量・音割れ率・推定SN比 / eng=取り込み方式 / dev=端末種別
+ */
+const META_KEYS = ["fmt", "srate", "mic", "proc", "peak", "clip", "snr", "eng", "dev"] as const;
+
+/** 一覧の上限（R2 は 1 回 1000 件まで返すので、カーソルで続きを取る） */
+const LIST_MAX_PAGES = 20;
+
 /** 管理APIを呼べるオリジン */
 // 誰でも呼べるエンドポイント（アップロード・失敗報告）用のCORSヘッダー
 const publicCorsHeaders: Record<string, string> = {
@@ -106,6 +116,18 @@ function sanitizeUserName(raw: string | null | undefined): string {
     return cleaned.length > 0 ? cleaned : "unknown";
 }
 
+/** 録音の付帯情報。許可したキーだけを短く安全な文字列にして保存する */
+function readUploadMeta(url: URL): Record<string, string> {
+    const meta: Record<string, string> = {};
+    for (const key of META_KEYS) {
+        const value = url.searchParams.get(key);
+        if (!value) continue;
+        const cleaned = value.replace(/[^0-9A-Za-z._-]/g, "").slice(0, 32);
+        if (cleaned) meta[key] = cleaned;
+    }
+    return meta;
+}
+
 /** 非ASCIIを含むファイル名でもヘッダーに載せられる形式にする（RFC 5987） */
 function contentDispositionFor(fileName: string): string {
     const ascii = fileName.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "");
@@ -172,14 +194,30 @@ export default {
                     return errorResponse("認証が必要です", 401, cors);
                 }
 
-                const list = await env.RECORDINGS.list();
-                const files = list.objects
-                    .filter((obj) => !obj.key.startsWith(ID_INDEX_PREFIX))
-                    .map((obj) => ({
-                        name: obj.key,
-                        size: obj.size,
-                        uploaded: obj.uploaded.toISOString(),
-                    }));
+                const files: {
+                    name: string;
+                    size: number;
+                    uploaded: string;
+                    meta?: Record<string, string>;
+                }[] = [];
+                let cursor: string | undefined;
+                for (let page = 0; page < LIST_MAX_PAGES; page++) {
+                    const list = await env.RECORDINGS.list({
+                        cursor,
+                        include: ["customMetadata"],
+                    });
+                    for (const obj of list.objects) {
+                        if (obj.key.startsWith(ID_INDEX_PREFIX)) continue;
+                        files.push({
+                            name: obj.key,
+                            size: obj.size,
+                            uploaded: obj.uploaded.toISOString(),
+                            meta: obj.customMetadata,
+                        });
+                    }
+                    if (!list.truncated) break;
+                    cursor = list.cursor;
+                }
 
                 return jsonResponse({ files }, cors);
             }
@@ -306,6 +344,7 @@ async function handleUpload(
     await env.RECORDINGS.put(fileName, bytes, {
         httpMetadata: { contentType: mimeType },
         customMetadata: {
+            ...readUploadMeta(url),
             userName,
             uploadedAt: date.toISOString(),
         },

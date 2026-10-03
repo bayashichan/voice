@@ -18,18 +18,26 @@ import {
   Download,
   RefreshCw,
 } from "lucide-react";
-import { AudioRecorder, AudioRecorderResult, MicMetrics } from "@/utils/audioRecorder";
+import {
+  AudioRecorder,
+  AudioRecorderResult,
+  MicMetrics,
+  TrackInfo,
+} from "@/utils/audioRecorder";
 import { GlowCountdown } from "@/components/GlowCountdown";
 import { AudioVisualizer } from "@/components/AudioVisualizer";
 import { MicLevelMeter } from "@/components/MicLevelMeter";
 import { uploadRecording, reportFailure } from "@/utils/uploadRecording";
 import { cn } from "@/utils/cn";
 import {
-  RECORDING_DURATION_SEC,
+  RECORDING_DISPLAY_SEC,
   RECORDING_HARD_TIMEOUT_MS,
-  MIN_ACCEPTABLE_DURATION_SEC,
+  RECORDING_STALL_MS,
   SILENCE_PEAK_THRESHOLD,
+  CLIP_RATIO_THRESHOLD,
+  MIN_SNR_DB,
 } from "@/utils/config";
+import { VOICESCAN_RECORD_SEC, VOICESCAN_SAMPLE_RATE } from "@/utils/voicescanFormat";
 import {
   detectEnvironment,
   getExternalBrowserGuide,
@@ -98,6 +106,30 @@ async function readMicPermissionState(): Promise<string> {
   } catch {
     return "unsupported";
   }
+}
+
+/**
+ * 保存ファイルに付ける録音情報。VoiceScan の一覧で形式の確認や
+ * 「結果がおかしい」ときの切り分け（音声処理がかかっていないか等）に使う。
+ */
+function buildUploadMeta(
+  result: AudioRecorderResult,
+  track: TrackInfo | null,
+  engine: string,
+  device: string
+): Record<string, string> {
+  const bit = (v: boolean | null | undefined) => (v === true ? "1" : v === false ? "0" : "-");
+  return {
+    fmt: `vs${VOICESCAN_SAMPLE_RATE}-${VOICESCAN_RECORD_SEC}s`,
+    srate: String(result.captureRate),
+    mic: track?.sampleRate ? String(track.sampleRate) : "-",
+    proc: `ec${bit(track?.echoCancellation)}ns${bit(track?.noiseSuppression)}agc${bit(track?.autoGainControl)}`,
+    peak: result.peak.toFixed(3),
+    clip: result.clipRatio.toFixed(4),
+    snr: result.snrDb.toFixed(1),
+    eng: engine,
+    dev: device,
+  };
 }
 
 function newUploadId(): string {
@@ -199,12 +231,17 @@ export default function Home() {
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [retryNotice, setRetryNotice] = useState<string>("");
   const [copied, setCopied] = useState<boolean>(false);
+  /** 音割れなど「録り直し推奨だが送信もできる」失敗のときに true */
+  const [canSendAnyway, setCanSendAnyway] = useState<boolean>(false);
 
   const recorderRef = useRef<AudioRecorder | null>(null);
   const stoppingRef = useRef<boolean>(false);
   const hardTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
   const uploadIdRef = useRef<string>("");
+  const uploadMetaRef = useRef<Record<string, string>>({});
+  const engineRef = useRef<string>("-");
+  const progressBarRef = useRef<HTMLDivElement>(null);
 
   // デバイス・ブラウザ判定
   useEffect(() => {
@@ -367,6 +404,7 @@ export default function Home() {
 
     try {
       const prepared = await recorder.prepare();
+      engineRef.current = prepared.engine;
       setAnalyser(prepared.analyser);
       setAppState("micReady");
       void requestWakeLock();
@@ -458,12 +496,17 @@ export default function Home() {
       return;
     }
 
-    if (result.duration < MIN_ACCEPTABLE_DURATION_SEC) {
+    // VoiceScan は先頭約11.9秒を解析する。そこまで実音声で埋まっていないと結果が変わるので送らない
+    if (!result.enoughForAnalysis) {
       setFailure({
         code: "TooShort",
         title: "録音が途中で止まりました",
         message: `${result.duration.toFixed(1)}秒しか録音できませんでした。録音中は画面を切り替えずにお待ちください。`,
-        hints: ["他のアプリに切り替えない", "画面を消灯させない"],
+        hints: [
+          "他のアプリに切り替えない",
+          "画面を消灯させない",
+          "録音中にBluetoothイヤホンなどを接続・切断しない",
+        ],
         action: "retry",
       });
       setAppState("error");
@@ -500,13 +543,71 @@ export default function Home() {
       stoppingRef.current = false;
       return;
     }
+
+    uploadMetaRef.current = buildUploadMeta(
+      result,
+      recorder.getTrackInfo(),
+      engineRef.current,
+      device
+    );
+    uploadIdRef.current = newUploadId();
+
+    // 音割れ・雑音は解析結果を変えるので録り直しを勧める。ただし送信もできるようにする
+    if (result.clipRatio >= CLIP_RATIO_THRESHOLD) {
+      setFailure({
+        code: "Clipped",
+        title: "声が大きすぎて音が割れています",
+        message:
+          "このままでも送信できますが、分析の精度が下がります。スマホを口元から少し離して、もう一度録音することをおすすめします。",
+        hints: [
+          "スマホを口元から20〜30cmほど離す",
+          "普段の会話くらいの声の大きさで話す",
+          "マイク（スマホの下部）に息が直接当たらないようにする",
+        ],
+        action: "retry",
+      });
+      setCanSendAnyway(true);
+      setAppState("error");
+      reportFailure({
+        stage: "録音",
+        errorName: "Clipped",
+        userName,
+        detail: `clip=${result.clipRatio.toFixed(4)}`,
+      });
+      stoppingRef.current = false;
+      return;
+    }
+
+    if (result.snrDb < MIN_SNR_DB) {
+      setFailure({
+        code: "Noisy",
+        title: "周りの音に対して声が小さめです",
+        message:
+          "このままでも送信できますが、分析の精度が下がる可能性があります。静かな場所で、もう一度録音することをおすすめします。",
+        hints: [
+          "テレビ・エアコン・換気扇などの音が少ない場所で録音する",
+          "スマホを口元から20〜30cmの位置に持つ",
+          "普段の会話くらいの声ではっきり話す",
+        ],
+        action: "retry",
+      });
+      setCanSendAnyway(true);
+      setAppState("error");
+      reportFailure({
+        stage: "録音",
+        errorName: "Noisy",
+        userName,
+        detail: `snr=${result.snrDb.toFixed(1)}`,
+      });
+      stoppingRef.current = false;
+      return;
+    }
     // --- ガードここまで ---
 
-    uploadIdRef.current = newUploadId();
     await sendToServer(result.blob, uploadIdRef.current);
     stoppingRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clearHardTimeout, releaseWakeLock, userName]);
+  }, [clearHardTimeout, releaseWakeLock, userName, device]);
 
   const sendToServer = useCallback(
     async (blob: Blob, uploadId: string) => {
@@ -519,6 +620,7 @@ export default function Home() {
           blob,
           userName,
           uploadId,
+          meta: uploadMetaRef.current,
           onProgress: setUploadProgress,
           onRetry: (attempt, max) => {
             setRetryNotice(`通信が不安定です。再送しています… (${attempt}/${max - 1})`);
@@ -561,7 +663,8 @@ export default function Home() {
     // 締め切りは壁時計ではなく実サンプル数で判定する。
     // 以前は state を切り替えた瞬間から10秒を数えていたため、
     // マイクが生きるまでの待ち時間の分だけ録音が短くなっていた。
-    recorder.beginCapture(RECORDING_DURATION_SEC, () => {
+    // 取り込む長さは VoiceScan の 12 秒設定の録音と同じ（約13.1秒）。
+    recorder.beginCapture(() => {
       void stopAndUpload();
     });
 
@@ -570,6 +673,44 @@ export default function Home() {
       void stopAndUpload();
     }, RECORDING_HARD_TIMEOUT_MS);
   }, [stopAndUpload]);
+
+  // 録音の進み具合をバーに反映し、マイクからの音声が止まったら早めに打ち切る。
+  // バーは実際に取り込めたサンプル数で動かす（以前はCSSアニメーションで、
+  // マイクの立ち上がりが遅れても止まっても進んで見えていた）。
+  useEffect(() => {
+    if (appState !== "recording") return;
+    const startedAt = performance.now();
+    let raf = 0;
+    const tick = () => {
+      const recorder = recorderRef.current;
+      if (!recorder || stoppingRef.current) return;
+      const { ratio, lastDataAt } = recorder.getCaptureProgress();
+      if (progressBarRef.current) {
+        progressBarRef.current.style.width = `${(ratio * 100).toFixed(1)}%`;
+      }
+      const now = performance.now();
+      const silentFor = lastDataAt > 0 ? now - lastDataAt : now - startedAt;
+      // 立ち上がりは少し待つ。止まった場合は取れた分で判定する（足りなければ録り直し案内）
+      if (silentFor > RECORDING_STALL_MS + (lastDataAt > 0 ? 0 : 2_000)) {
+        void stopAndUpload();
+        return;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [appState, stopAndUpload]);
+
+  // 録音・保存の途中でページを閉じたり再読み込みしたりしないよう確認を出す
+  useEffect(() => {
+    if (appState !== "countdown" && appState !== "recording" && appState !== "uploading") return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [appState]);
 
   // 録音中に他アプリ・ホーム画面へ移ると音声が途切れるため中断する
   useEffect(() => {
@@ -667,6 +808,7 @@ export default function Home() {
     stoppingRef.current = false;
     setFailure(null);
     setDiagnostic("");
+    setCanSendAnyway(false);
     setRecordedBlob(null);
     setRecordedDuration(0);
     setUploadProgress(0);
@@ -681,6 +823,7 @@ export default function Home() {
     stoppingRef.current = false;
     setFailure(null);
     setDiagnostic("");
+    setCanSendAnyway(false);
     setRecordedBlob(null);
     setRecordedDuration(0);
     setUploadProgress(0);
@@ -693,6 +836,14 @@ export default function Home() {
     if (!recordedBlob) return;
     if (!uploadIdRef.current) uploadIdRef.current = newUploadId();
     void sendToServer(recordedBlob, uploadIdRef.current);
+  };
+
+  /** 音割れの警告を受けたうえで、そのまま送信する */
+  const sendAnyway = () => {
+    if (!recordedBlob) return;
+    setCanSendAnyway(false);
+    setFailure(null);
+    retryUpload();
   };
 
   // ---------------------------------------------------------------- 表示部品
@@ -1069,7 +1220,7 @@ export default function Home() {
 
           <p className="text-sm text-cyan-400/80 mt-4">
             ※ <span className="font-bold">3→2→1</span> のカウントダウンのあと、
-            {RECORDING_DURATION_SEC}秒間録音します
+            約{RECORDING_DISPLAY_SEC}秒間録音します
           </p>
           <p className="text-xs text-yellow-400/80 mt-2">
             録音が終わるまで、他のアプリに切り替えないでください
@@ -1098,13 +1249,11 @@ export default function Home() {
             </div>
             {analyser && <AudioVisualizer analyser={analyser} isRecording={true} />}
             <div className="w-full h-3 md:h-4 bg-gray-800 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-cyan-500"
-                style={{
-                  animation: `recordingProgress ${RECORDING_DURATION_SEC}s linear forwards`,
-                }}
-              />
+              <div ref={progressBarRef} className="h-full bg-cyan-500" style={{ width: "0%" }} />
             </div>
+            <p className="text-sm text-gray-400">
+              バーが右端に届くまで（約{RECORDING_DISPLAY_SEC}秒）続けてください
+            </p>
             <p className="text-xs text-yellow-400/80">
               他のアプリに切り替えないでください
             </p>
@@ -1241,7 +1390,7 @@ export default function Home() {
             )}
 
             {/* 録音が取れている場合のみ、手元に保存する手段を出す */}
-            {recordedBlob && recordedDuration >= 3 && (
+            {!canSendAnyway && recordedBlob && recordedDuration >= 3 && (
               <div className="w-full max-w-sm space-y-3">
                 <p className="text-sm text-yellow-400 text-center">
                   録音データは手元に残っています
@@ -1256,6 +1405,15 @@ export default function Home() {
                 className="w-full max-w-sm py-4 bg-red-600 rounded-xl font-bold text-lg hover:bg-red-700 transition-colors"
               >
                 もう一度試す
+              </button>
+            )}
+
+            {canSendAnyway && recordedBlob && (
+              <button
+                onClick={sendAnyway}
+                className="w-full max-w-sm py-3 bg-gray-700 rounded-xl text-sm font-medium text-gray-200 hover:bg-gray-600 transition-colors"
+              >
+                このまま送信する
               </button>
             )}
 
